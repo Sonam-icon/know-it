@@ -3,8 +3,9 @@
 ## Implementation status
 
 - **Phase 0 — Complete:** project metadata, locked dependencies, validated settings, public API schemas, application factory, health endpoint, and baseline tests.
-- **Phase 1 — Next:** reproducible corpus and ingestion pipeline.
-- **Phases 2–6 — Planned:** query graph, required API routes, reliability, evaluation, and submission review.
+- **Phase 1 — Implemented:** reproducible corpus, safe loaders, heading-aware chunks, Gemini embedding adapter, versioned Chroma storage, and corpus CLI. Live seeding awaits GOOGLE_API_KEY in the runtime environment.
+- **Phase 2 — Next:** query analysis, retrieval, grading, rewrite routing, and generation.
+- **Phases 3–6 — Planned:** required API routes, reliability, evaluation, and submission review.
 - **Bonus work — Deferred:** begins only after the required completion gate passes.
 
 ## 1. Outcome and scope

@@ -2,7 +2,7 @@
 
 Know-It is a self-corrective retrieval-augmented generation (RAG) assistant for technical documentation. A user asks a natural-language question, the system improves the search query, retrieves relevant documentation chunks, grades each chunk for relevance, and generates an answer grounded in the accepted evidence. Answers include source references. If the indexed corpus cannot support an answer, the system returns an explicit insufficient-context response.
 
-The project is being implemented phase by phase. Phase 0, the application foundation and public contracts, is complete. The ingestion pipeline, LangGraph workflow, and required API routes follow in the next phases. The complete rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+The project is being implemented phase by phase. The application foundation and Phase 1 ingestion pipeline are implemented. Live corpus seeding requires GOOGLE_API_KEY; the loaders and chunker have already been validated against all five source pages without using model credits. The complete rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ## What the project does
 
@@ -79,8 +79,8 @@ Persistent local Chroma and SQLite keep the take-home straightforward to run. Th
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 0 | Project foundation, settings, API contracts, health endpoint | Complete |
-| 1 | Corpus, loaders, chunking, embeddings, Chroma ingestion | Next |
-| 2 | LangGraph query analysis, retrieval, grading, rewrite, generation | Planned |
+| 1 | Corpus, safe loaders, chunking, Gemini embeddings, Chroma ingestion | Implemented; live seed pending API key |
+| 2 | LangGraph query analysis, retrieval, grading, rewrite, generation | Next |
 | 3 | Required FastAPI routes and feedback persistence | Planned |
 | 4 | Retry policies, checkpoints, observability, operating limits | Planned |
 | 5 | Automated tests and retrieval/answer evaluation | Planned |
@@ -91,10 +91,21 @@ Persistent local Chroma and SQLite keep the take-home straightforward to run. Th
 
 ~~~text
 app/
+  bootstrap.py    # dependency construction
+  chunking.py     # heading-aware, token-bounded splitting
+  cli.py          # corpus seed, inspect, and list commands
   config.py       # validated environment configuration
+  documents.py    # ingestion domain models
+  errors.py       # application-level errors
+  ingestion.py    # ingestion use-case coordinator
+  loaders.py      # bounded file and public URL loading
   main.py         # FastAPI application factory and health endpoint
+  providers.py    # Gemini embedding adapter
   schemas.py      # public API contracts
-tests/            # Phase 0 contract and health tests
+  vector_store.py # versioned Chroma document index
+corpus/
+  seed_urls.json  # five official FastAPI documentation pages
+tests/            # deterministic unit and integration tests
 .env.example      # documented configuration
 pyproject.toml    # dependencies and development tools
 ~~~
@@ -157,6 +168,30 @@ Run quality checks:
 uv run ruff check .
 uv run pytest
 ~~~
+
+## Corpus ingestion
+
+Inspect the real corpus without calling Gemini or writing to Chroma:
+
+~~~bash
+uv run python -m app.cli inspect
+~~~
+
+Once GOOGLE_API_KEY is configured, load and embed all five seed pages:
+
+~~~bash
+uv run python -m app.cli seed
+~~~
+
+The seed operation is idempotent. An unchanged document reuses its indexed chunks without another embedding call. A changed document is embedded under versioned chunk IDs before stale chunks are removed.
+
+List the documents currently stored in Chroma:
+
+~~~bash
+uv run python -m app.cli list
+~~~
+
+Phase 1 accepts UTF-8 Markdown, plain text, and HTML. URL loading permits public HTTP and HTTPS destinations, validates every redirect, caps download size and redirects, removes page navigation, and retains headings, lists, tables, paragraphs, and code blocks. Chunks target 700 tokens with an 80-token overlap for oversized sections.
 
 ## Required API surface
 
