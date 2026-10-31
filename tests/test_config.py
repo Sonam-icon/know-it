@@ -22,3 +22,17 @@ def test_chunk_overlap_must_be_smaller_than_chunk_size() -> None:
             chunk_size_tokens=100,
             chunk_overlap_tokens=100,
         )
+
+
+def test_comma_separated_google_keys_are_trimmed_and_deduplicated() -> None:
+    settings = Settings(
+        _env_file=None,
+        google_api_key=" key-a, key-b, key-a, ,key-c ",
+    )
+
+    assert settings.provider_configured is True
+    assert [key.get_secret_value() for key in settings.google_api_keys] == [
+        "key-a",
+        "key-b",
+        "key-c",
+    ]

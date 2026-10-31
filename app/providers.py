@@ -1,11 +1,14 @@
 """External model provider adapters."""
 
-from typing import Protocol, TypeVar
+import logging
+from dataclasses import dataclass
+from threading import Lock
+from typing import Generic, Protocol, TypeVar
 
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 
 from app.config import Settings
 from app.documents import RetrievedChunk
@@ -28,6 +31,45 @@ from app.rag import (
 )
 
 StructuredOutput = TypeVar("StructuredOutput", bound=BaseModel)
+PoolItem = TypeVar("PoolItem")
+logger = logging.getLogger(__name__)
+
+
+class RoundRobinPool(Generic[PoolItem]):
+    """Select configured clients in order without holding a lock during I/O."""
+
+    def __init__(self, items: list[PoolItem]) -> None:
+        if not items:
+            raise ValueError("RoundRobinPool requires at least one item")
+        self._items = tuple(items)
+        self._index = 0
+        self._lock = Lock()
+
+    @property
+    def size(self) -> int:
+        return len(self._items)
+
+    def next(self) -> PoolItem:
+        with self._lock:
+            item = self._items[self._index]
+            self._index = (self._index + 1) % len(self._items)
+        return item
+
+
+@dataclass(frozen=True, slots=True)
+class _EmbeddingClients:
+    documents: GoogleGenerativeAIEmbeddings
+    queries: GoogleGenerativeAIEmbeddings
+
+
+@dataclass(frozen=True, slots=True)
+class _QueryClients:
+    analyzer: object
+    grader: object
+    rewriter: object
+    generator: object
+    verifier: object
+    reviser: object
 
 
 class EmbeddingProvider(Protocol):
@@ -43,49 +85,65 @@ class GeminiEmbeddingProvider:
     """Gemini embeddings configured separately for documents and queries."""
 
     def __init__(self, settings: Settings) -> None:
-        if not settings.provider_configured or settings.google_api_key is None:
+        if not settings.provider_configured:
             raise ConfigurationError("GOOGLE_API_KEY is required for embedding operations")
         self.model_name = settings.embedding_model
         self.dimension = settings.embedding_dimension
-        common = {
-            "model": settings.embedding_model,
-            "api_key": settings.google_api_key,
-            "output_dimensionality": settings.embedding_dimension,
-        }
-        self._documents = GoogleGenerativeAIEmbeddings(
-            **common,
-            task_type="RETRIEVAL_DOCUMENT",
+        self._clients = RoundRobinPool(
+            [
+                _EmbeddingClients(
+                    documents=GoogleGenerativeAIEmbeddings(
+                        model=settings.embedding_model,
+                        api_key=api_key,
+                        output_dimensionality=settings.embedding_dimension,
+                        task_type="RETRIEVAL_DOCUMENT",
+                    ),
+                    queries=GoogleGenerativeAIEmbeddings(
+                        model=settings.embedding_model,
+                        api_key=api_key,
+                        output_dimensionality=settings.embedding_dimension,
+                        task_type="RETRIEVAL_QUERY",
+                    ),
+                )
+                for api_key in settings.google_api_keys
+            ]
         )
-        self._queries = GoogleGenerativeAIEmbeddings(
-            **common,
-            task_type="RETRIEVAL_QUERY",
-        )
+        logger.info("gemini_embedding_pool_configured key_count=%s", self._clients.size)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self._documents.embed_documents(texts)
+        return self._clients.next().documents.embed_documents(texts)
 
     def embed_query(self, text: str) -> list[float]:
-        return self._queries.embed_query(text)
+        return self._clients.next().queries.embed_query(text)
 
 
 class GeminiQueryModel:
     """Structured Gemini calls for each reasoning responsibility in the graph."""
 
     def __init__(self, settings: Settings) -> None:
-        if not settings.provider_configured or settings.google_api_key is None:
+        if not settings.provider_configured:
             raise ConfigurationError("GOOGLE_API_KEY is required for query operations")
+        self._clients = RoundRobinPool(
+            [self._build_clients(settings, api_key) for api_key in settings.google_api_keys]
+        )
+        logger.info("gemini_chat_pool_configured key_count=%s", self._clients.size)
+
+    @staticmethod
+    def _build_clients(settings: Settings, api_key: SecretStr) -> _QueryClients:
         model = ChatGoogleGenerativeAI(
             model=settings.chat_model,
-            api_key=settings.google_api_key,
+            api_key=api_key,
             retries=0,
             request_timeout=settings.provider_timeout_seconds,
         )
-        self._analyzer = model.with_structured_output(QueryAnalysis)
-        self._grader = model.with_structured_output(RelevanceGrade)
-        self._rewriter = model.with_structured_output(QueryRewrite)
-        self._generator = model.with_structured_output(AnswerDraft)
-        self._verifier = model.with_structured_output(GroundednessVerdict)
-        self._reviser = model.with_structured_output(AnswerDraft)
+        return _QueryClients(
+            analyzer=model.with_structured_output(QueryAnalysis),
+            grader=model.with_structured_output(RelevanceGrade),
+            rewriter=model.with_structured_output(QueryRewrite),
+            generator=model.with_structured_output(AnswerDraft),
+            verifier=model.with_structured_output(GroundednessVerdict),
+            reviser=model.with_structured_output(AnswerDraft),
+        )
 
     def analyze(
         self,
@@ -95,16 +153,18 @@ class GeminiQueryModel:
         history_text = "\n\n".join(
             f"User: {turn.question}\nAssistant: {turn.answer}" for turn in history
         )
+        clients = self._clients.next()
         return self._invoke(
-            self._analyzer,
+            clients.analyzer,
             QueryAnalysis,
             ANALYZE_SYSTEM_PROMPT,
             (f"Conversation history:\n{history_text or '(none)'}\n\nLatest question:\n{question}"),
         )
 
     def grade(self, question: str, chunk: RetrievedChunk) -> RelevanceGrade:
+        clients = self._clients.next()
         return self._invoke(
-            self._grader,
+            clients.grader,
             RelevanceGrade,
             GRADE_SYSTEM_PROMPT,
             (
@@ -123,8 +183,9 @@ class GeminiQueryModel:
         attempted_queries: list[str],
     ) -> QueryRewrite:
         attempts = "\n".join(f"- {query}" for query in attempted_queries)
+        clients = self._clients.next()
         return self._invoke(
-            self._rewriter,
+            clients.rewriter,
             QueryRewrite,
             REWRITE_SYSTEM_PROMPT,
             (
@@ -158,8 +219,9 @@ class GeminiQueryModel:
                 "Return a fresh corrected draft. Ensure every citation ID exists in the "
                 "approved sources and the inline [S#] markers exactly match citation_ids."
             )
+        clients = self._clients.next()
         return self._invoke(
-            self._generator,
+            clients.generator,
             AnswerDraft,
             GENERATE_SYSTEM_PROMPT,
             f"Question:\n{question}\n\nApproved sources:\n{context}{correction}",
@@ -172,8 +234,9 @@ class GeminiQueryModel:
         chunks: list[RetrievedChunk],
     ) -> GroundednessVerdict:
         context = self._format_context(chunks)
+        clients = self._clients.next()
         return self._invoke(
-            self._verifier,
+            clients.verifier,
             GroundednessVerdict,
             VERIFY_SYSTEM_PROMPT,
             (
@@ -192,8 +255,9 @@ class GeminiQueryModel:
     ) -> AnswerDraft:
         context = self._format_context(chunks)
         problems = "\n".join(f"- {claim}" for claim in unsupported_claims)
+        clients = self._clients.next()
         return self._invoke(
-            self._reviser,
+            clients.reviser,
             AnswerDraft,
             REVISE_SYSTEM_PROMPT,
             (

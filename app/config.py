@@ -65,7 +65,19 @@ class Settings(BaseSettings):
     def provider_configured(self) -> bool:
         """Report whether live Gemini operations can be used."""
 
-        return self.google_api_key is not None and bool(self.google_api_key.get_secret_value())
+        return bool(self.google_api_keys)
+
+    @property
+    def google_api_keys(self) -> tuple[SecretStr, ...]:
+        """Return unique Gemini keys from the comma-separated primary setting."""
+
+        if self.google_api_key is None:
+            return ()
+        values = (
+            value.strip()
+            for value in self.google_api_key.get_secret_value().split(",")
+        )
+        return tuple(SecretStr(value) for value in dict.fromkeys(values) if value)
 
     @property
     def allowed_web_domains(self) -> tuple[str, ...]:

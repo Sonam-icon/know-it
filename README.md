@@ -167,7 +167,13 @@ On PowerShell:
 Copy-Item .env.example .env
 ~~~
 
-Set `GOOGLE_API_KEY` in `.env`. To enable web fallback, also set `TAVILY_API_KEY` and change `WEB_FALLBACK_ENABLED=true`. The application can start without either key for local contract tests; live ingestion and queries require Gemini. Chroma runs locally at `CHROMA_PATH`, so this design does not require a Chroma API key.
+Set `GOOGLE_API_KEY` in `.env`. It accepts either one key or multiple comma-separated keys; chat and embedding calls select keys round-robin with thread-safe counters. To enable web fallback, also set `TAVILY_API_KEY` and change `WEB_FALLBACK_ENABLED=true`. The application can start without either key for local contract tests; live ingestion and queries require Gemini. Chroma runs locally at `CHROMA_PATH`, so this design does not require a Chroma API key.
+
+~~~env
+GOOGLE_API_KEY=key-one,key-two,key-three
+~~~
+
+Multiple keys increase available quota only when Google applies quota independently to those keys or their projects; keys from the same quota pool may not increase the effective limit.
 
 Run the current API:
 

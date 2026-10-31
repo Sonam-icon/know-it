@@ -15,7 +15,7 @@
 
 Build a locally runnable FastAPI service that answers questions using a small, explicit corpus of technical documentation. Every substantive answer must be grounded in indexed chunks and return references to those chunks. When the corpus cannot support an answer, the service must say so. The required submission includes ingestion, a LangGraph StateGraph, the four specified API endpoints, tests, and a complete README. The bonus roadmap extends this baseline without changing its default behavior.
 
-This plan uses the choices already made for the project: **Google Gemini** for chat and embeddings, **ChromaDB** for vector search, and **FastAPI's official documentation** as the initial five-page corpus. The user will supply GOOGLE_API_KEY through an environment variable for live validation; credentials will never be committed.
+This plan uses the choices already made for the project: **Google Gemini** for chat and embeddings, **ChromaDB** for vector search, and **FastAPI's official documentation** as the initial five-page corpus. The user supplies `GOOGLE_API_KEY` through an environment variable for live validation; the setting accepts either one key or a comma-separated pool. Credentials will never be committed.
 
 ### Guiding design principles
 
@@ -43,7 +43,7 @@ The graph handles one question per invocation. The API may supply a bounded hist
 ### Work
 
 - Establish Python version, package management, dependency ranges, formatting, and test commands in pyproject.toml. Record exact resolved versions in a lock file or pinned requirements before submission.
-- Define environment settings in one place: GOOGLE_API_KEY, chat model, embedding model, Chroma path, top-k, maximum query rewrites, provider timeout, and ingestion limits. Provide .env.example and ignore .env, local databases, caches, and keys.
+- Define environment settings in one place: `GOOGLE_API_KEY`, chat model, embedding model, Chroma path, top-k, maximum query rewrites, provider timeout, and ingestion limits. Parse optional comma-separated Gemini keys into a trimmed, deduplicated secret pool. Provide `.env.example` and ignore `.env`, local databases, caches, and keys.
 - Define public Pydantic request/response schemas before implementing routes. Decide the exact shape of an answer, source reference, document summary, ingest result, and feedback receipt.
 - Select one configurable Gemini Flash model for analysis, grading, and generation; start with gemini-3.5-flash-lite and verify it with the supplied key. Use gemini-embedding-001 at 3,072 dimensions. Record the embedding model and dimension with the index so a change requires a rebuild.
 
@@ -284,7 +284,7 @@ Ruff and all deterministic tests must pass before provider testing. With credent
 
 | Decision | Benefit | Cost or limitation |
 | --- | --- | --- |
-| Gemini for chat and embeddings | One credential and one provider setup | Provider latency, quotas, and costs affect both ingestion and queries |
+| Gemini for chat and embeddings | One provider setup with an optional key pool | Chat and embedding operations rotate through keys independently; effective quota still depends on Google's project-level quota rules |
 | One stable text embedding model per collection | Consistent vector space and straightforward index validation | Changing models requires a full re-embedding |
 | Persistent local Chroma | Easy setup and inspectable corpus | Intended for a single local instance |
 | LLM grading per chunk | Explicit self-correction and clear evidence trail | More model calls; keep top-k small |
