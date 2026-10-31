@@ -43,3 +43,7 @@ class CitationValidationError(ApplicationError):
 
 class QueryValidationError(ApplicationError):
     """A question does not satisfy the query service contract."""
+
+
+class AnswerNotFoundError(ApplicationError):
+    """Feedback references an answer that does not exist."""

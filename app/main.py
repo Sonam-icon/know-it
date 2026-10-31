@@ -5,18 +5,48 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api import ApplicationServices, router
+from app.bootstrap import build_document_store, build_runtime_services
 from app.config import Settings, get_settings
+from app.repository import SQLiteRepository
 from app.schemas import HealthResponse
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    services: ApplicationServices | None = None,
+) -> FastAPI:
     """Create the HTTP application with explicit, testable dependencies."""
 
     app_settings = settings or get_settings()
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # Later phases initialize shared provider, graph, and storage clients here.
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        if services is not None:
+            services.repository.initialize()
+            application.state.services = services
+        else:
+            repository = SQLiteRepository(app_settings.application_db_path)
+            repository.initialize()
+            document_store = build_document_store(app_settings)
+            if app_settings.provider_configured:
+                runtime = build_runtime_services(
+                    app_settings,
+                    store=document_store,
+                )
+                application.state.services = ApplicationServices(
+                    query=runtime.query,
+                    ingestion=runtime.ingestion,
+                    documents=runtime.documents,
+                    repository=repository,
+                )
+            else:
+                application.state.services = ApplicationServices(
+                    query=None,
+                    ingestion=None,
+                    documents=document_store,
+                    repository=repository,
+                )
         yield
 
     application = FastAPI(
@@ -26,6 +56,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     application.state.settings = app_settings
+    application.include_router(router)
 
     @application.get("/health", response_model=HealthResponse, tags=["operations"])
     async def health() -> HealthResponse:

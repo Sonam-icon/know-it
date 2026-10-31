@@ -1,5 +1,7 @@
 """Construct application services from validated settings."""
 
+from dataclasses import dataclass
+
 from app.chunking import TechnicalDocumentChunker
 from app.config import Settings
 from app.ingestion import IngestionService
@@ -7,6 +9,13 @@ from app.loaders import DocumentLoader
 from app.providers import GeminiEmbeddingProvider, GeminiQueryModel
 from app.query_workflow import QueryWorkflow, build_query_workflow
 from app.vector_store import ChromaDocumentStore
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeServices:
+    query: QueryWorkflow
+    ingestion: IngestionService
+    documents: ChromaDocumentStore
 
 
 def build_document_loader(settings: Settings) -> DocumentLoader:
@@ -68,4 +77,38 @@ def build_query_service(settings: Settings) -> QueryWorkflow:
         grading_concurrency=settings.grading_concurrency,
         max_context_characters=settings.max_context_characters,
         max_question_length=settings.max_question_length,
+    )
+
+
+def build_runtime_services(
+    settings: Settings,
+    *,
+    store: ChromaDocumentStore | None = None,
+) -> RuntimeServices:
+    embeddings = GeminiEmbeddingProvider(settings)
+    document_store = store or build_document_store(
+        settings,
+        embedding_model=embeddings.model_name,
+        embedding_dimension=embeddings.dimension,
+    )
+    ingestion = IngestionService(
+        loader=build_document_loader(settings),
+        chunker=build_document_chunker(settings),
+        embeddings=embeddings,
+        store=document_store,
+    )
+    query = build_query_workflow(
+        model=GeminiQueryModel(settings),
+        embeddings=embeddings,
+        retriever=document_store,
+        top_k=settings.retrieval_top_k,
+        max_query_rewrites=settings.max_query_rewrites,
+        grading_concurrency=settings.grading_concurrency,
+        max_context_characters=settings.max_context_characters,
+        max_question_length=settings.max_question_length,
+    )
+    return RuntimeServices(
+        query=query,
+        ingestion=ingestion,
+        documents=document_store,
     )

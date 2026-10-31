@@ -2,7 +2,7 @@
 
 Know-It is a self-corrective retrieval-augmented generation (RAG) assistant for technical documentation. A user asks a natural-language question, the system improves the search query, retrieves relevant documentation chunks, grades each chunk for relevance, and generates an answer grounded in the accepted evidence. Answers include source references. If the indexed corpus cannot support an answer, the system returns an explicit insufficient-context response.
 
-The project is being implemented phase by phase. The application foundation, ingestion pipeline, and self-corrective LangGraph query workflow are implemented. Live corpus seeding and an end-to-end Gemini query require GOOGLE_API_KEY; deterministic tests cover the graph paths without using model credits. The complete rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+The project is being implemented phase by phase. The application foundation, ingestion pipeline, self-corrective LangGraph workflow, and required FastAPI surface are implemented. Live corpus seeding and an end-to-end Gemini query require GOOGLE_API_KEY; deterministic tests cover the graph and API paths without using model credits. The complete rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ## What the project does
 
@@ -81,8 +81,8 @@ Persistent local Chroma and SQLite keep the take-home straightforward to run. Th
 | 0 | Project foundation, settings, API contracts, health endpoint | Complete |
 | 1 | Corpus, safe loaders, chunking, Gemini embeddings, Chroma ingestion | Implemented; live seed pending API key |
 | 2 | LangGraph query analysis, retrieval, grading, rewrite, generation | Implemented; live run pending API key |
-| 3 | Required FastAPI routes and feedback persistence | Next |
-| 4 | Retry policies, checkpoints, observability, operating limits | Planned |
+| 3 | Required FastAPI routes and SQLite answer/feedback persistence | Complete |
+| 4 | Retry policies, checkpoints, observability, operating limits | Next |
 | 5 | Automated tests and retrieval/answer evaluation | Planned |
 | 6 | Final setup guide, API examples, and submission review | Planned |
 | Bonus | Groundedness check, memory, web fallback, UI | Deferred |
@@ -91,6 +91,7 @@ Persistent local Chroma and SQLite keep the take-home straightforward to run. Th
 
 ~~~text
 app/
+  api.py          # required HTTP routes and error translation
   bootstrap.py    # dependency construction
   chunking.py     # heading-aware, token-bounded splitting
   cli.py          # corpus seed, inspect, and list commands
@@ -104,6 +105,7 @@ app/
   providers.py    # Gemini embedding and structured chat adapters
   query_workflow.py # typed LangGraph nodes, edges, and query service
   rag.py          # query workflow domain and structured-output contracts
+  repository.py   # SQLite answer and feedback persistence
   schemas.py      # public API contracts
   vector_store.py # versioned Chroma document index
 corpus/
@@ -216,9 +218,9 @@ The graph performs these steps:
 
 The original question remains unchanged throughout the graph. Retrieval results, grades, and relevant chunks are replaced on every loop, preventing evidence from an earlier failed search from leaking into generation.
 
-## Required API surface
+## API
 
-These routes will be implemented in Phase 3 after ingestion and graph services exist:
+All required routes are registered in FastAPI and appear in the generated documentation at http://127.0.0.1:8000/docs.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
@@ -227,4 +229,80 @@ These routes will be implemented in Phase 3 after ingestion and graph services e
 | GET | /documents | List indexed documents |
 | POST | /feedback | Record thumbs up/down feedback and an optional comment |
 
-GET /health is already available as an operational endpoint.
+GET /health is also available as an operational endpoint. Without GOOGLE_API_KEY, health and document listing remain available while query and ingestion return HTTP 503.
+
+### Submit a question
+
+~~~bash
+curl -X POST http://127.0.0.1:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How do FastAPI dependencies work?"}'
+~~~
+
+Example response:
+
+~~~json
+{
+  "answer_id": "93b9c7a6-aa54-4e98-bf00-b3877bc9f185",
+  "answer": "Declare a dependency with Depends and a callable. [S1]",
+  "status": "answered",
+  "sources": [
+    {
+      "citation_id": "S1",
+      "chunk_id": "chunk-hash",
+      "document_id": "document-hash",
+      "title": "Dependencies",
+      "heading": "Dependencies / Import Depends",
+      "source": "https://fastapi.tiangolo.com/tutorial/dependencies/",
+      "source_kind": "url",
+      "excerpt": "FastAPI provides the Depends function..."
+    }
+  ],
+  "rewrite_count": 0
+}
+~~~
+
+The server stores the answer before returning its ID, allowing later feedback to reference a real response.
+
+### Ingest a URL or file
+
+The endpoint accepts multipart form data with exactly one source:
+
+~~~bash
+curl -X POST http://127.0.0.1:8000/ingest \
+  -F "url=https://fastapi.tiangolo.com/tutorial/dependencies/"
+~~~
+
+~~~bash
+curl -X POST http://127.0.0.1:8000/ingest \
+  -F "file=@docs/guide.md;type=text/markdown"
+~~~
+
+Example response:
+
+~~~json
+{
+  "document_id": "document-hash",
+  "title": "Dependencies",
+  "source": "https://fastapi.tiangolo.com/tutorial/dependencies/",
+  "source_kind": "url",
+  "chunk_count": 6,
+  "status": "created"
+}
+~~~
+
+### List documents
+
+~~~bash
+curl http://127.0.0.1:8000/documents
+~~~
+
+### Submit feedback
+
+~~~bash
+curl -X POST http://127.0.0.1:8000/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"answer_id":"93b9c7a6-aa54-4e98-bf00-b3877bc9f185","rating":"up","comment":"Useful answer"}'
+~~~
+
+Feedback for an unknown answer returns HTTP 404. Invalid request bodies return 422, oversized uploads return 413, and unsupported file formats return 415.
