@@ -25,6 +25,15 @@ def test_markdown_file_is_normalized_with_stable_identity(loader: DocumentLoader
     assert first.text == "# Guide\n\n Install the package."
 
 
+def test_code_fence_preserves_python_indentation(loader: DocumentLoader) -> None:
+    source = b"# Example\n\n```python\ndef get_value():\n    return True\n```\n\n  More   text."
+
+    document = loader.load_file("example.md", source)
+
+    assert "def get_value():\n    return True" in document.text
+    assert "More text." in document.text
+
+
 def test_html_extraction_keeps_content_and_code_but_drops_navigation() -> None:
     html = """
     <html><head><title>Fallback</title></head><body>

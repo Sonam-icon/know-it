@@ -33,7 +33,20 @@ def _sha256(value: str) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    lines = [_SPACE_PATTERN.sub(" ", line).rstrip() for line in text.splitlines()]
+    lines: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines():
+        marker = line.lstrip()[:3]
+        if marker in {_CODE_FENCE, "~~~"}:
+            lines.append(line.rstrip())
+            if marker == fence:
+                fence = None
+            elif fence is None:
+                fence = marker
+        elif fence is not None:
+            lines.append(line)
+        else:
+            lines.append(_SPACE_PATTERN.sub(" ", line).rstrip())
     return "\n".join(lines).strip()
 
 
