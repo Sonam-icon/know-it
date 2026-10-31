@@ -1,11 +1,7 @@
-import sqlite3
-from datetime import UTC, datetime, timedelta
-
 import httpx
 from google.genai.errors import APIError
 from langgraph.types import RetryPolicy
 
-from app.checkpoints import SQLiteCheckpointManager
 from app.reliability import is_transient_error
 from tests.test_query_workflow import (
     FakeEmbeddings,
@@ -90,35 +86,3 @@ def test_permanent_node_failure_is_not_retried() -> None:
         raise AssertionError("Permanent failure should propagate")
 
     assert embeddings.attempts == 1
-
-
-def test_sqlite_checkpoints_persist_state_and_expire_by_thread(tmp_path) -> None:
-    path = tmp_path / "checkpoints.sqlite3"
-    manager = SQLiteCheckpointManager(path)
-    manager.initialize()
-    try:
-        model = FakeQueryModel(relevant_ids={"relevant"})
-        workflow = _workflow(
-            model,
-            FakeRetriever([[_chunk("relevant")]]),
-            FakeEmbeddings(),
-            checkpointer=manager.saver,
-            on_complete=manager.complete,
-        )
-
-        workflow.run("Question")
-
-        assert manager.completed_thread_count() == 1
-        assert len(list(manager.saver.list(None))) > 1
-
-        old_timestamp = (datetime.now(UTC) - timedelta(days=30)).isoformat()
-        with sqlite3.connect(path) as connection:
-            connection.execute(
-                "UPDATE checkpoint_threads SET completed_at = ?",
-                (old_timestamp,),
-            )
-        assert manager.cleanup(retention_days=7) == 1
-        assert manager.completed_thread_count() == 0
-        assert list(manager.saver.list(None)) == []
-    finally:
-        manager.close()

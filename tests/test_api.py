@@ -13,12 +13,20 @@ from app.documents import (
 )
 from app.errors import UnsupportedDocumentError
 from app.main import create_app
-from app.rag import AnswerSource, AnswerStatus, QueryResult
+from app.rag import AnswerSource, AnswerStatus, ConversationTurn, QueryResult
 from app.repository import SQLiteRepository
 
 
 class FakeQueryService:
-    def run(self, question: str) -> QueryResult:
+    def __init__(self) -> None:
+        self.histories: list[tuple[ConversationTurn, ...]] = []
+
+    def run(
+        self,
+        question: str,
+        history: tuple[ConversationTurn, ...] = (),
+    ) -> QueryResult:
+        self.histories.append(history)
         return QueryResult(
             answer=f"Answer to: {question} [S1]",
             status=AnswerStatus.ANSWERED,
@@ -84,13 +92,15 @@ def _ingestion_result(
 class ApiContext:
     client: TestClient
     repository: SQLiteRepository
+    query: FakeQueryService
 
 
 @pytest.fixture
 def api(tmp_path):
     repository = SQLiteRepository(tmp_path / "application.sqlite3")
+    query = FakeQueryService()
     services = ApplicationServices(
-        query=FakeQueryService(),
+        query=query,
         ingestion=FakeIngestionService(),
         documents=FakeDocumentStore(),
         repository=repository,
@@ -102,7 +112,7 @@ def api(tmp_path):
         max_upload_bytes=1024,
     )
     with TestClient(create_app(settings, services)) as client:
-        yield ApiContext(client=client, repository=repository)
+        yield ApiContext(client=client, repository=repository, query=query)
 
 
 def test_query_returns_sources_and_persists_answer(api: ApiContext) -> None:
@@ -114,10 +124,47 @@ def test_query_returns_sources_and_persists_answer(api: ApiContext) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "answered"
+    assert payload["session_id"]
     assert payload["sources"][0]["citation_id"] == "S1"
+    assert payload["sources"][0]["origin"] == "corpus"
     stored = api.repository.get_answer(payload["answer_id"])
     assert stored is not None
     assert stored.question == "How do dependencies work?"
+    assert str(stored.session_id) == payload["session_id"]
+
+
+def test_query_continues_a_known_session(api: ApiContext) -> None:
+    first = api.client.post("/query", json={"question": "What is Depends?"}).json()
+
+    second = api.client.post(
+        "/query",
+        json={"question": "What about its default?", "session_id": first["session_id"]},
+    )
+
+    assert second.status_code == 200
+    assert second.json()["session_id"] == first["session_id"]
+    assert api.query.histories[-1][0].question == "What is Depends?"
+
+
+def test_new_query_does_not_inherit_another_session(api: ApiContext) -> None:
+    api.client.post("/query", json={"question": "First session"})
+
+    response = api.client.post("/query", json={"question": "Independent session"})
+
+    assert response.status_code == 200
+    assert api.query.histories[-1] == ()
+
+
+def test_query_rejects_an_unknown_session(api: ApiContext) -> None:
+    response = api.client.post(
+        "/query",
+        json={
+            "question": "Follow-up",
+            "session_id": "d868f67d-b0bd-4fd3-a9de-42e6b9b9cfb9",
+        },
+    )
+
+    assert response.status_code == 404
 
 
 def test_feedback_is_linked_to_a_known_answer(api: ApiContext) -> None:
@@ -223,12 +270,3 @@ def test_openapi_exposes_all_required_routes(api: ApiContext) -> None:
     paths = api.client.get("/openapi.json").json()["paths"]
 
     assert {"/query", "/ingest", "/documents", "/feedback"} <= set(paths)
-
-
-def test_request_id_is_preserved_for_correlation(api: ApiContext) -> None:
-    response = api.client.get(
-        "/documents",
-        headers={"X-Request-ID": "test-request-123"},
-    )
-
-    assert response.headers["X-Request-ID"] == "test-request-123"

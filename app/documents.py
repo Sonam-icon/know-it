@@ -9,6 +9,11 @@ class SourceKind(StrEnum):
     URL = "url"
 
 
+class SourceOrigin(StrEnum):
+    CORPUS = "corpus"
+    WEB = "web"
+
+
 class IndexingStatus(StrEnum):
     CREATED = "created"
     UPDATED = "updated"
@@ -75,3 +80,4 @@ class RetrievedChunk:
     heading: str
     text: str
     distance: float
+    origin: SourceOrigin = SourceOrigin.CORPUS

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Annotated, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from google.genai.errors import APIError
 from starlette.concurrency import run_in_threadpool
@@ -20,11 +21,13 @@ from app.errors import (
     EmptyDocumentError,
     IndexConfigurationError,
     QueryValidationError,
+    SessionNotFoundError,
     StructuredOutputError,
     UnsafeUrlError,
     UnsupportedDocumentError,
+    WebSearchError,
 )
-from app.rag import QueryResult
+from app.rag import ConversationTurn, QueryResult
 from app.reliability import is_transient_error
 from app.repository import SQLiteRepository
 from app.schemas import (
@@ -44,7 +47,11 @@ router = APIRouter()
 
 
 class QueryRunner(Protocol):
-    def run(self, question: str) -> QueryResult: ...
+    def run(
+        self,
+        question: str,
+        history: tuple[ConversationTurn, ...] = (),
+    ) -> QueryResult: ...
 
 
 class IngestionRunner(Protocol):
@@ -63,6 +70,8 @@ class ApplicationServices:
     ingestion: IngestionRunner | None
     documents: DocumentCatalog
     repository: SQLiteRepository
+    memory_turn_limit: int = 3
+    memory_max_characters: int = 6000
 
 
 def get_services(request: Request) -> ApplicationServices:
@@ -80,12 +89,24 @@ def query_documents(payload: QueryRequest, services: Services) -> QueryResponse:
             detail="Gemini is not configured; set GOOGLE_API_KEY",
         )
     try:
-        result = services.query.run(payload.question)
-        answer_id = services.repository.save_answer(payload.question, result)
+        session_id = payload.session_id or uuid4()
+        if payload.session_id is not None and not services.repository.session_exists(session_id):
+            raise SessionNotFoundError(f"Session {session_id} was not found")
+        history = services.repository.recent_turns(
+            session_id,
+            limit=services.memory_turn_limit,
+            max_characters=services.memory_max_characters,
+        )
+        result = services.query.run(payload.question, history)
+        answer_id = services.repository.save_answer(
+            payload.question,
+            result,
+            session_id=session_id,
+        )
     except Exception as exc:
         _raise_application_error(exc)
         raise
-    return _query_response(answer_id, result)
+    return _query_response(answer_id, session_id, result)
 
 
 @router.post("/ingest", response_model=IngestResponse, tags=["documents"])
@@ -173,9 +194,10 @@ def submit_feedback(payload: FeedbackRequest, services: Services) -> FeedbackRes
     )
 
 
-def _query_response(answer_id: UUID, result: QueryResult) -> QueryResponse:
+def _query_response(answer_id: UUID, session_id: UUID, result: QueryResult) -> QueryResponse:
     return QueryResponse(
         answer_id=answer_id,
+        session_id=session_id,
         answer=result.answer,
         status=QueryStatus(result.status.value),
         sources=[
@@ -187,11 +209,13 @@ def _query_response(answer_id: UUID, result: QueryResult) -> QueryResponse:
                 heading=source.heading,
                 source=source.source,
                 source_kind=source.source_kind.value,
+                origin=source.origin.value,
                 excerpt=source.excerpt,
             )
             for source in result.sources
         ],
         rewrite_count=result.rewrite_count,
+        web_attempted=result.web_attempted,
     )
 
 
@@ -208,7 +232,7 @@ def _ingest_response(result: IngestionResult) -> IngestResponse:
 
 
 def _raise_application_error(exc: Exception) -> None:
-    if isinstance(exc, AnswerNotFoundError):
+    if isinstance(exc, (AnswerNotFoundError, SessionNotFoundError)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     if isinstance(exc, DocumentTooLargeError):
         raise HTTPException(
@@ -233,7 +257,10 @@ def _raise_application_error(exc: Exception) -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
-    if isinstance(exc, (StructuredOutputError, CitationValidationError)):
+    if isinstance(
+        exc,
+        (StructuredOutputError, CitationValidationError, WebSearchError),
+    ):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
@@ -247,4 +274,9 @@ def _raise_application_error(exc: Exception) -> None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="The model provider rejected the request",
+        ) from exc
+    if isinstance(exc, httpx.HTTPStatusError):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The web-search provider rejected the request",
         ) from exc

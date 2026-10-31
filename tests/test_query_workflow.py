@@ -1,17 +1,18 @@
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import RetryPolicy
 
-from app.documents import RetrievedChunk, SourceKind
+from app.documents import RetrievedChunk, SourceKind, SourceOrigin
 from app.errors import CitationValidationError, StructuredOutputError
 from app.query_workflow import build_query_workflow
 from app.rag import (
     AnswerDraft,
     AnswerStatus,
+    ConversationTurn,
+    GroundednessVerdict,
     QueryAnalysis,
-    QueryKind,
     QueryRewrite,
     RelevanceGrade,
 )
@@ -69,6 +70,8 @@ class FakeQueryModel:
         relevant_ids: set[str],
         rewrites: list[str] | None = None,
         draft: AnswerDraft | None = None,
+        revision: AnswerDraft | None = None,
+        verdicts: list[GroundednessVerdict] | None = None,
         analysis_error: bool = False,
     ) -> None:
         self.relevant_ids = relevant_ids
@@ -77,15 +80,26 @@ class FakeQueryModel:
             answer="Use the documented API. [S1]",
             citation_ids=["S1"],
         )
+        self.revision = revision or self.draft
+        self.verdicts = list(
+            verdicts or [GroundednessVerdict(supported=True, unsupported_claims=[])]
+        )
         self.analysis_error = analysis_error
         self.generated_with: list[RetrievedChunk] = []
+        self.analysis_history: tuple[ConversationTurn, ...] = ()
+        self.revision_calls = 0
 
-    def analyze(self, question: str) -> QueryAnalysis:
+    def analyze(
+        self,
+        question: str,
+        history: tuple[ConversationTurn, ...],
+    ) -> QueryAnalysis:
         if self.analysis_error:
             raise StructuredOutputError("invalid analysis")
+        self.analysis_history = history
         return QueryAnalysis(
+            standalone_question=question,
             search_query="initial retrieval query",
-            query_type=QueryKind.HOW_TO,
         )
 
     def grade(self, question: str, chunk: RetrievedChunk) -> RelevanceGrade:
@@ -114,6 +128,38 @@ class FakeQueryModel:
         self.generated_with = chunks
         return self.draft
 
+    def verify(
+        self,
+        question: str,
+        draft: AnswerDraft,
+        chunks: list[RetrievedChunk],
+    ) -> GroundednessVerdict:
+        del question, draft, chunks
+        index = min(self.revision_calls, len(self.verdicts) - 1)
+        return self.verdicts[index]
+
+    def revise(
+        self,
+        question: str,
+        draft: AnswerDraft,
+        chunks: list[RetrievedChunk],
+        unsupported_claims: list[str],
+    ) -> AnswerDraft:
+        del question, draft, chunks, unsupported_claims
+        self.revision_calls += 1
+        return self.revision
+
+
+class FakeWebSearcher:
+    def __init__(self, chunks: list[RetrievedChunk]) -> None:
+        self.chunks = chunks
+        self.calls = 0
+
+    def search(self, query: str, *, top_k: int) -> list[RetrievedChunk]:
+        del query
+        self.calls += 1
+        return self.chunks[:top_k]
+
 
 def _workflow(
     model: FakeQueryModel,
@@ -122,9 +168,8 @@ def _workflow(
     *,
     max_rewrites: int = 2,
     max_context_characters: int = 10_000,
+    web_searcher: FakeWebSearcher | None = None,
     retry_policy: RetryPolicy | None = None,
-    checkpointer: BaseCheckpointSaver | None = None,
-    on_complete=None,
 ):
     return build_query_workflow(
         model=model,
@@ -132,12 +177,10 @@ def _workflow(
         retriever=retriever,
         top_k=5,
         max_query_rewrites=max_rewrites,
-        grading_concurrency=1,
         max_context_characters=max_context_characters,
         max_question_length=2000,
+        web_searcher=web_searcher,
         retry_policy=retry_policy,
-        checkpointer=checkpointer,
-        on_complete=on_complete,
     )
 
 
@@ -246,3 +289,108 @@ def test_graph_invocations_do_not_share_request_state() -> None:
 
     assert first.rewrite_count == second.rewrite_count == 0
     assert embeddings.queries == ["initial retrieval query", "initial retrieval query"]
+
+
+def test_unsupported_draft_is_revised_and_verified_once() -> None:
+    model = FakeQueryModel(
+        relevant_ids={"relevant"},
+        revision=AnswerDraft(answer="Corrected answer. [S1]", citation_ids=["S1"]),
+        verdicts=[
+            GroundednessVerdict(supported=False, unsupported_claims=["Unsupported claim"]),
+            GroundednessVerdict(supported=True, unsupported_claims=[]),
+        ],
+    )
+
+    result = _workflow(
+        model,
+        FakeRetriever([[_chunk("relevant")]]),
+        FakeEmbeddings(),
+    ).run("Question")
+
+    assert result.status is AnswerStatus.ANSWERED
+    assert result.answer == "Corrected answer. [S1]"
+    assert model.revision_calls == 1
+
+
+def test_failed_revision_abstains() -> None:
+    model = FakeQueryModel(
+        relevant_ids={"relevant"},
+        verdicts=[GroundednessVerdict(supported=False, unsupported_claims=["Claim"])],
+    )
+
+    result = _workflow(
+        model,
+        FakeRetriever([[_chunk("relevant")]]),
+        FakeEmbeddings(),
+    ).run("Question")
+
+    assert result.status is AnswerStatus.INSUFFICIENT_CONTEXT
+    assert result.sources == ()
+    assert model.revision_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("supported", "claims"),
+    [
+        (True, ["Contradictory claim"]),
+        (False, []),
+    ],
+)
+def test_groundedness_verdict_rejects_contradictory_states(
+    supported: bool,
+    claims: list[str],
+) -> None:
+    with pytest.raises(ValueError):
+        GroundednessVerdict(supported=supported, unsupported_claims=claims)
+
+
+def test_web_fallback_runs_once_and_labels_sources() -> None:
+    web_chunk = _chunk("web", "Official web documentation.")
+    web_chunk = replace(web_chunk, origin=SourceOrigin.WEB)
+    model = FakeQueryModel(
+        relevant_ids={"web"},
+        rewrites=["second", "third"],
+    )
+    searcher = FakeWebSearcher([web_chunk])
+
+    result = _workflow(
+        model,
+        FakeRetriever([[_chunk("irrelevant")]]),
+        FakeEmbeddings(),
+        web_searcher=searcher,
+    ).run("Question")
+
+    assert result.status is AnswerStatus.ANSWERED
+    assert result.web_attempted is True
+    assert result.sources[0].origin is SourceOrigin.WEB
+    assert searcher.calls == 1
+
+
+def test_irrelevant_web_results_abstain_without_another_search() -> None:
+    searcher = FakeWebSearcher([replace(_chunk("web"), origin=SourceOrigin.WEB)])
+    model = FakeQueryModel(relevant_ids=set(), rewrites=["second", "third"])
+
+    result = _workflow(
+        model,
+        FakeRetriever([[_chunk("irrelevant")]]),
+        FakeEmbeddings(),
+        web_searcher=searcher,
+    ).run("Question")
+
+    assert result.status is AnswerStatus.INSUFFICIENT_CONTEXT
+    assert result.web_attempted is True
+    assert result.sources == ()
+    assert searcher.calls == 1
+
+
+def test_history_is_passed_only_to_query_analysis() -> None:
+    model = FakeQueryModel(relevant_ids={"relevant"})
+    history = (ConversationTurn(question="What is Depends?", answer="A helper. [S1]"),)
+
+    _workflow(
+        model,
+        FakeRetriever([[_chunk("relevant")]]),
+        FakeEmbeddings(),
+    ).run("What about its default?", history)
+
+    assert model.analysis_history == history

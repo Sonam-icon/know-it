@@ -33,6 +33,7 @@ class FeedbackRating(StrEnum):
 
 class QueryRequest(ApiModel):
     question: NonEmptyText = Field(max_length=2000, examples=["How do FastAPI dependencies work?"])
+    session_id: UUID | None = None
 
 
 class SourceReference(ApiModel):
@@ -43,15 +44,18 @@ class SourceReference(ApiModel):
     heading: NonEmptyText
     source: NonEmptyText
     source_kind: Literal["file", "url"]
+    origin: Literal["corpus", "web"]
     excerpt: NonEmptyText
 
 
 class QueryResponse(ApiModel):
     answer_id: UUID
+    session_id: UUID
     answer: NonEmptyText
     status: QueryStatus
     sources: list[SourceReference] = Field(default_factory=list)
     rewrite_count: int = Field(ge=0)
+    web_attempted: bool = False
 
 
 class IngestResponse(ApiModel):

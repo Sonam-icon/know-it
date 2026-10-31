@@ -44,3 +44,49 @@ def test_feedback_rejects_an_unknown_answer(tmp_path) -> None:
             rating=FeedbackRating.DOWN,
             comment=None,
         )
+
+
+def test_session_history_is_bounded_and_ordered(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "application.sqlite3")
+    repository.initialize()
+    session_id = uuid4()
+    result = QueryResult(
+        answer="Answer",
+        status=AnswerStatus.ANSWERED,
+        sources=(),
+        rewrite_count=0,
+    )
+    for index in range(4):
+        repository.save_answer(f"Question {index}", result, session_id=session_id)
+
+    history = repository.recent_turns(session_id, limit=3, max_characters=1000)
+
+    assert [turn.question for turn in history] == ["Question 1", "Question 2", "Question 3"]
+    assert repository.session_exists(session_id)
+
+
+def test_initialize_migrates_an_existing_answers_table(tmp_path) -> None:
+    import sqlite3
+
+    path = tmp_path / "application.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE answers (
+                answer_id TEXT PRIMARY KEY,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                status TEXT NOT NULL,
+                sources_json TEXT NOT NULL,
+                rewrite_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    repository = SQLiteRepository(path)
+    repository.initialize()
+
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(answers)")}
+    assert "session_id" in columns

@@ -16,6 +16,8 @@ def is_transient_error(exc: Exception) -> bool:
 
     if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
         return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _TRANSIENT_STATUS_CODES
     if isinstance(exc, APIError):
         return exc.code in _TRANSIENT_STATUS_CODES
     if isinstance(exc, sqlite3.OperationalError):
@@ -26,9 +28,9 @@ def is_transient_error(exc: Exception) -> bool:
 
 def build_retry_policy(settings: Settings) -> RetryPolicy:
     return RetryPolicy(
-        initial_interval=settings.retry_initial_interval_seconds,
+        initial_interval=0.5,
         backoff_factor=2.0,
-        max_interval=settings.retry_max_interval_seconds,
+        max_interval=4.0,
         max_attempts=settings.provider_max_attempts,
         jitter=True,
         retry_on=is_transient_error,

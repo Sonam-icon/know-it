@@ -14,10 +14,14 @@ from app.prompts import (
     ANALYZE_SYSTEM_PROMPT,
     GENERATE_SYSTEM_PROMPT,
     GRADE_SYSTEM_PROMPT,
+    REVISE_SYSTEM_PROMPT,
     REWRITE_SYSTEM_PROMPT,
+    VERIFY_SYSTEM_PROMPT,
 )
 from app.rag import (
     AnswerDraft,
+    ConversationTurn,
+    GroundednessVerdict,
     QueryAnalysis,
     QueryRewrite,
     RelevanceGrade,
@@ -81,13 +85,22 @@ class GeminiQueryModel:
         self._grader = model.with_structured_output(RelevanceGrade)
         self._rewriter = model.with_structured_output(QueryRewrite)
         self._generator = model.with_structured_output(AnswerDraft)
+        self._verifier = model.with_structured_output(GroundednessVerdict)
+        self._reviser = model.with_structured_output(AnswerDraft)
 
-    def analyze(self, question: str) -> QueryAnalysis:
+    def analyze(
+        self,
+        question: str,
+        history: tuple[ConversationTurn, ...],
+    ) -> QueryAnalysis:
+        history_text = "\n\n".join(
+            f"User: {turn.question}\nAssistant: {turn.answer}" for turn in history
+        )
         return self._invoke(
             self._analyzer,
             QueryAnalysis,
             ANALYZE_SYSTEM_PROMPT,
-            f"Original question:\n{question}",
+            (f"Conversation history:\n{history_text or '(none)'}\n\nLatest question:\n{question}"),
         )
 
     def grade(self, question: str, chunk: RetrievedChunk) -> RelevanceGrade:
@@ -142,6 +155,57 @@ class GeminiQueryModel:
             AnswerDraft,
             GENERATE_SYSTEM_PROMPT,
             f"Question:\n{question}\n\nApproved sources:\n{context}",
+        )
+
+    def verify(
+        self,
+        question: str,
+        draft: AnswerDraft,
+        chunks: list[RetrievedChunk],
+    ) -> GroundednessVerdict:
+        context = self._format_context(chunks)
+        return self._invoke(
+            self._verifier,
+            GroundednessVerdict,
+            VERIFY_SYSTEM_PROMPT,
+            (
+                f"Question:\n{question}\n\n"
+                f"Draft answer:\n{draft.answer}\n\n"
+                f"Approved sources:\n{context}"
+            ),
+        )
+
+    def revise(
+        self,
+        question: str,
+        draft: AnswerDraft,
+        chunks: list[RetrievedChunk],
+        unsupported_claims: list[str],
+    ) -> AnswerDraft:
+        context = self._format_context(chunks)
+        problems = "\n".join(f"- {claim}" for claim in unsupported_claims)
+        return self._invoke(
+            self._reviser,
+            AnswerDraft,
+            REVISE_SYSTEM_PROMPT,
+            (
+                f"Question:\n{question}\n\n"
+                f"Draft answer:\n{draft.answer}\n\n"
+                f"Unsupported claims:\n{problems}\n\n"
+                f"Approved sources:\n{context}"
+            ),
+        )
+
+    @staticmethod
+    def _format_context(chunks: list[RetrievedChunk]) -> str:
+        return "\n\n---\n\n".join(
+            (
+                f"SOURCE_ID: S{index}\n"
+                f"Title: {chunk.title}\n"
+                f"Heading: {chunk.heading}\n"
+                f"Content:\n{chunk.text}"
+            )
+            for index, chunk in enumerate(chunks, start=1)
         )
 
     @staticmethod

@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -7,9 +8,7 @@ from fastapi import FastAPI
 
 from app.api import ApplicationServices, router
 from app.bootstrap import build_document_store, build_runtime_services
-from app.checkpoints import SQLiteCheckpointManager
 from app.config import Settings, get_settings
-from app.observability import RequestContextMiddleware, configure_logging
 from app.repository import SQLiteRepository
 from app.schemas import HealthResponse
 
@@ -21,45 +20,37 @@ def create_app(
     """Create the HTTP application with explicit, testable dependencies."""
 
     app_settings = settings or get_settings()
-    configure_logging(app_settings.log_level)
+    logging.basicConfig(level=app_settings.log_level.upper())
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        checkpoint_manager: SQLiteCheckpointManager | None = None
-        try:
-            if services is not None:
-                services.repository.initialize()
-                application.state.services = services
+        if services is not None:
+            services.repository.initialize()
+            application.state.services = services
+        else:
+            repository = SQLiteRepository(app_settings.application_db_path)
+            repository.initialize()
+            document_store = build_document_store(app_settings)
+            if app_settings.provider_configured:
+                runtime = build_runtime_services(app_settings, store=document_store)
+                application.state.services = ApplicationServices(
+                    query=runtime.query,
+                    ingestion=runtime.ingestion,
+                    documents=runtime.documents,
+                    repository=repository,
+                    memory_turn_limit=app_settings.memory_turn_limit,
+                    memory_max_characters=app_settings.memory_max_characters,
+                )
             else:
-                repository = SQLiteRepository(app_settings.application_db_path)
-                repository.initialize()
-                document_store = build_document_store(app_settings)
-                if app_settings.provider_configured:
-                    checkpoint_manager = SQLiteCheckpointManager(app_settings.checkpoint_db_path)
-                    checkpoint_manager.initialize()
-                    checkpoint_manager.cleanup(app_settings.checkpoint_retention_days)
-                    runtime = build_runtime_services(
-                        app_settings,
-                        store=document_store,
-                        checkpoint_manager=checkpoint_manager,
-                    )
-                    application.state.services = ApplicationServices(
-                        query=runtime.query,
-                        ingestion=runtime.ingestion,
-                        documents=runtime.documents,
-                        repository=repository,
-                    )
-                else:
-                    application.state.services = ApplicationServices(
-                        query=None,
-                        ingestion=None,
-                        documents=document_store,
-                        repository=repository,
-                    )
-            yield
-        finally:
-            if checkpoint_manager is not None:
-                checkpoint_manager.close()
+                application.state.services = ApplicationServices(
+                    query=None,
+                    ingestion=None,
+                    documents=document_store,
+                    repository=repository,
+                    memory_turn_limit=app_settings.memory_turn_limit,
+                    memory_max_characters=app_settings.memory_max_characters,
+                )
+        yield
 
     application = FastAPI(
         title=app_settings.app_name,
@@ -68,7 +59,6 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.settings = app_settings
-    application.add_middleware(RequestContextMiddleware)
     application.include_router(router)
 
     @application.get("/health", response_model=HealthResponse, tags=["operations"])

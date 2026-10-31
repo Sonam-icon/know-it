@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 
-from app.checkpoints import SQLiteCheckpointManager
 from app.chunking import TechnicalDocumentChunker
 from app.config import Settings
 from app.ingestion import IngestionService
@@ -11,6 +10,7 @@ from app.providers import GeminiEmbeddingProvider, GeminiQueryModel
 from app.query_workflow import QueryWorkflow, build_query_workflow
 from app.reliability import build_retry_policy
 from app.vector_store import ChromaDocumentStore
+from app.web_search import TavilySearcher
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,9 +76,11 @@ def build_query_service(settings: Settings) -> QueryWorkflow:
         ),
         top_k=settings.retrieval_top_k,
         max_query_rewrites=settings.max_query_rewrites,
-        grading_concurrency=settings.grading_concurrency,
         max_context_characters=settings.max_context_characters,
         max_question_length=settings.max_question_length,
+        max_answer_revisions=settings.max_answer_revisions,
+        web_searcher=TavilySearcher(settings) if settings.web_fallback_enabled else None,
+        web_top_k=settings.web_search_top_k,
         retry_policy=build_retry_policy(settings),
     )
 
@@ -87,7 +89,6 @@ def build_runtime_services(
     settings: Settings,
     *,
     store: ChromaDocumentStore | None = None,
-    checkpoint_manager: SQLiteCheckpointManager | None = None,
 ) -> RuntimeServices:
     embeddings = GeminiEmbeddingProvider(settings)
     document_store = store or build_document_store(
@@ -107,12 +108,12 @@ def build_runtime_services(
         retriever=document_store,
         top_k=settings.retrieval_top_k,
         max_query_rewrites=settings.max_query_rewrites,
-        grading_concurrency=settings.grading_concurrency,
         max_context_characters=settings.max_context_characters,
         max_question_length=settings.max_question_length,
+        max_answer_revisions=settings.max_answer_revisions,
+        web_searcher=TavilySearcher(settings) if settings.web_fallback_enabled else None,
+        web_top_k=settings.web_search_top_k,
         retry_policy=build_retry_policy(settings),
-        checkpointer=checkpoint_manager.saver if checkpoint_manager else None,
-        on_complete=checkpoint_manager.complete if checkpoint_manager else None,
     )
     return RuntimeServices(
         query=query,

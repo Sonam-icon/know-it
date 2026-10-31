@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from app.errors import AnswerNotFoundError
-from app.rag import QueryResult
+from app.rag import ConversationTurn, QueryResult
 from app.schemas import FeedbackRating
 
 
@@ -21,6 +21,7 @@ class StoredAnswer:
     answer: str
     status: str
     rewrite_count: int
+    session_id: UUID | None
 
 
 class SQLiteRepository:
@@ -42,6 +43,7 @@ class SQLiteRepository:
                     status TEXT NOT NULL,
                     sources_json TEXT NOT NULL,
                     rewrite_count INTEGER NOT NULL CHECK (rewrite_count >= 0),
+                    session_id TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -58,8 +60,22 @@ class SQLiteRepository:
                 ON feedback(answer_id);
                 """
             )
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(answers)").fetchall()
+            }
+            if "session_id" not in columns:
+                connection.execute("ALTER TABLE answers ADD COLUMN session_id TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS answers_session_idx ON answers(session_id, created_at)"
+            )
 
-    def save_answer(self, question: str, result: QueryResult) -> UUID:
+    def save_answer(
+        self,
+        question: str,
+        result: QueryResult,
+        *,
+        session_id: UUID | None = None,
+    ) -> UUID:
         answer_id = uuid4()
         sources_json = json.dumps(
             [asdict(source) for source in result.sources],
@@ -71,8 +87,8 @@ class SQLiteRepository:
                 """
                 INSERT INTO answers (
                     answer_id, question, answer, status, sources_json,
-                    rewrite_count, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    rewrite_count, session_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(answer_id),
@@ -81,6 +97,7 @@ class SQLiteRepository:
                     result.status.value,
                     sources_json,
                     result.rewrite_count,
+                    str(session_id) if session_id else None,
                     _utc_now(),
                 ),
             )
@@ -121,7 +138,7 @@ class SQLiteRepository:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT answer_id, question, answer, status, rewrite_count
+                SELECT answer_id, question, answer, status, rewrite_count, session_id
                 FROM answers
                 WHERE answer_id = ?
                 """,
@@ -135,7 +152,53 @@ class SQLiteRepository:
             answer=row["answer"],
             status=row["status"],
             rewrite_count=row["rewrite_count"],
+            session_id=UUID(row["session_id"]) if row["session_id"] else None,
         )
+
+    def session_exists(self, session_id: UUID) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM answers WHERE session_id = ? LIMIT 1",
+                (str(session_id),),
+            ).fetchone()
+        return row is not None
+
+    def recent_turns(
+        self,
+        session_id: UUID,
+        *,
+        limit: int,
+        max_characters: int,
+    ) -> tuple[ConversationTurn, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT question, answer
+                FROM answers
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (str(session_id), limit),
+            ).fetchall()
+
+        selected: list[ConversationTurn] = []
+        used = 0
+        for row in rows:
+            turn_size = len(row["question"]) + len(row["answer"])
+            if selected and used + turn_size > max_characters:
+                break
+            remaining = max_characters - used
+            if remaining <= 0:
+                break
+            answer = str(row["answer"])
+            question = str(row["question"])
+            if turn_size > remaining:
+                question = question[:remaining]
+                answer = answer[: max(0, remaining - len(question))]
+            selected.append(ConversationTurn(question=question, answer=answer))
+            used += len(question) + len(answer)
+        return tuple(reversed(selected))
 
     def feedback_count(self, answer_id: UUID) -> int:
         with self._connect() as connection:

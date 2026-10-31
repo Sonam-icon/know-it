@@ -4,34 +4,34 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Protocol, TypedDict
-from uuid import uuid4
 
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
 
-from app.documents import RetrievedChunk
+from app.documents import RetrievedChunk, SourceOrigin
 from app.errors import CitationValidationError, QueryValidationError, StructuredOutputError
 from app.providers import EmbeddingProvider
 from app.rag import (
+    AnswerDraft,
     AnswerSource,
     AnswerStatus,
+    ConversationTurn,
     GradedChunk,
-    QueryKind,
+    GroundednessVerdict,
     QueryModel,
     QueryResult,
     RouteAfterGrade,
     RouteAfterRewrite,
+    RouteAfterVerify,
 )
 
 _CITATION_PATTERN = re.compile(r"\[(S\d+)\]")
 _ABSTENTION = (
-    "I could not find enough relevant information in the indexed documentation "
+    "I could not find enough relevant information in the available documentation "
     "to answer this question."
 )
 logger = logging.getLogger(__name__)
@@ -46,8 +46,13 @@ class VectorRetriever(Protocol):
     ) -> list[RetrievedChunk]: ...
 
 
+class WebSearcher(Protocol):
+    def search(self, query: str, *, top_k: int) -> list[RetrievedChunk]: ...
+
+
 class QueryInput(TypedDict):
     question: str
+    history: tuple[ConversationTurn, ...]
 
 
 class QueryOutput(TypedDict):
@@ -55,18 +60,27 @@ class QueryOutput(TypedDict):
     status: AnswerStatus
     sources: list[AnswerSource]
     rewrite_count: int
+    web_attempted: bool
 
 
 class QueryState(TypedDict, total=False):
     question: str
+    history: tuple[ConversationTurn, ...]
+    standalone_question: str
     search_query: str
-    query_type: QueryKind
     retrieved_chunks: list[RetrievedChunk]
     grades: list[GradedChunk]
     relevant_chunks: list[RetrievedChunk]
     attempted_queries: list[str]
     rewrite_count: int
     rewrite_exhausted: bool
+    retrieval_origin: SourceOrigin
+    web_attempted: bool
+    context_chunks: list[RetrievedChunk]
+    draft: AnswerDraft
+    draft_sources: list[AnswerSource]
+    verification: GroundednessVerdict
+    revision_count: int
     answer: str
     sources: list[AnswerSource]
     status: AnswerStatus
@@ -81,14 +95,16 @@ class QueryWorkflow:
         *,
         max_question_length: int,
         recursion_limit: int,
-        on_complete: Callable[[str], None] | None = None,
     ) -> None:
         self.graph = graph
         self.max_question_length = max_question_length
         self.recursion_limit = recursion_limit
-        self.on_complete = on_complete
 
-    def run(self, question: str) -> QueryResult:
+    def run(
+        self,
+        question: str,
+        history: tuple[ConversationTurn, ...] = (),
+    ) -> QueryResult:
         normalized = question.strip()
         if not normalized:
             raise QueryValidationError("Question must not be empty")
@@ -96,21 +112,12 @@ class QueryWorkflow:
             raise QueryValidationError(
                 f"Question exceeds the {self.max_question_length}-character limit"
             )
-        thread_id = str(uuid4())
-        try:
-            output = self.graph.invoke(
-                {"question": normalized},
-                {
-                    "recursion_limit": self.recursion_limit,
-                    "configurable": {"thread_id": thread_id},
-                },
-            )
-        finally:
-            if self.on_complete is not None:
-                self.on_complete(thread_id)
+        output = self.graph.invoke(
+            {"question": normalized, "history": history},
+            {"recursion_limit": self.recursion_limit},
+        )
         logger.info(
-            "query_complete thread_id=%s status=%s rewrite_count=%s source_count=%s",
-            thread_id,
+            "query_complete status=%s rewrite_count=%s source_count=%s",
             output["status"].value,
             output["rewrite_count"],
             len(output["sources"]),
@@ -120,6 +127,7 @@ class QueryWorkflow:
             status=output["status"],
             sources=tuple(output["sources"]),
             rewrite_count=output["rewrite_count"],
+            web_attempted=output["web_attempted"],
         )
 
 
@@ -130,32 +138,35 @@ def build_query_workflow(
     retriever: VectorRetriever,
     top_k: int,
     max_query_rewrites: int,
-    grading_concurrency: int,
     max_context_characters: int,
     max_question_length: int,
+    max_answer_revisions: int = 1,
+    web_searcher: WebSearcher | None = None,
+    web_top_k: int = 3,
     retry_policy: RetryPolicy | None = None,
-    checkpointer: BaseCheckpointSaver | None = None,
-    on_complete: Callable[[str], None] | None = None,
 ) -> QueryWorkflow:
     """Build the graph with dependencies captured by node closures."""
 
     def analyze(state: QueryState) -> QueryState:
         question = state["question"]
         try:
-            result = model.analyze(question)
+            result = model.analyze(question, state.get("history", ()))
+            standalone_question = _normalize_query(result.standalone_question)
             search_query = _normalize_query(result.search_query)
-            query_type = result.query_type
         except StructuredOutputError:
             logger.warning("query_analysis_fallback reason=invalid_structured_output")
+            standalone_question = question
             search_query = question
-            query_type = QueryKind.CONCEPTUAL
-        logger.info("graph_node=analyze query_type=%s", query_type.value)
+        logger.info("graph_node=analyze")
         return {
+            "standalone_question": standalone_question,
             "search_query": search_query,
-            "query_type": query_type,
             "attempted_queries": [search_query],
             "rewrite_count": 0,
             "rewrite_exhausted": False,
+            "retrieval_origin": SourceOrigin.CORPUS,
+            "web_attempted": False,
+            "revision_count": 0,
             "retrieved_chunks": [],
             "grades": [],
             "relevant_chunks": [],
@@ -167,6 +178,7 @@ def build_query_workflow(
         logger.info("graph_node=retrieve result_count=%s", len(chunks))
         return {
             "retrieved_chunks": chunks,
+            "retrieval_origin": SourceOrigin.CORPUS,
             "grades": [],
             "relevant_chunks": [],
         }
@@ -175,19 +187,14 @@ def build_query_workflow(
         chunks = state.get("retrieved_chunks", [])
 
         def grade_one(chunk: RetrievedChunk) -> GradedChunk:
-            result = model.grade(state["question"], chunk)
+            result = model.grade(state["standalone_question"], chunk)
             return GradedChunk(
                 chunk_id=chunk.chunk_id,
                 relevant=result.relevant,
                 reason=result.reason,
             )
 
-        if len(chunks) < 2 or grading_concurrency == 1:
-            grades = [grade_one(chunk) for chunk in chunks]
-        else:
-            workers = min(grading_concurrency, len(chunks))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                grades = list(executor.map(grade_one, chunks))
+        grades = [grade_one(chunk) for chunk in chunks]
         relevant_ids = {item.chunk_id for item in grades if item.relevant}
         relevant = [chunk for chunk in chunks if chunk.chunk_id in relevant_ids]
         logger.info(
@@ -200,7 +207,7 @@ def build_query_workflow(
     def rewrite(state: QueryState) -> QueryState:
         attempted = state.get("attempted_queries", [])
         result = model.rewrite(
-            state["question"],
+            state["standalone_question"],
             state["search_query"],
             attempted,
         )
@@ -222,12 +229,25 @@ def build_query_workflow(
             "relevant_chunks": [],
         }
 
+    def search_web(state: QueryState) -> QueryState:
+        if web_searcher is None:  # pragma: no cover - routing prevents this
+            return {"retrieved_chunks": [], "web_attempted": True}
+        chunks = web_searcher.search(state["search_query"], top_k=web_top_k)
+        logger.info("graph_node=search_web result_count=%s", len(chunks))
+        return {
+            "retrieved_chunks": chunks,
+            "retrieval_origin": SourceOrigin.WEB,
+            "web_attempted": True,
+            "grades": [],
+            "relevant_chunks": [],
+        }
+
     def generate(state: QueryState) -> QueryState:
         context = _bounded_context(
             state.get("relevant_chunks", []),
             max_characters=max_context_characters,
         )
-        draft = model.generate(state["question"], context)
+        draft = model.generate(state["standalone_question"], context)
         sources = _validate_and_build_sources(draft.answer, draft.citation_ids, context)
         logger.info(
             "graph_node=generate context_count=%s citation_count=%s",
@@ -235,8 +255,48 @@ def build_query_workflow(
             len(sources),
         )
         return {
-            "answer": draft.answer,
-            "sources": sources,
+            "context_chunks": context,
+            "draft": draft,
+            "draft_sources": sources,
+        }
+
+    def verify(state: QueryState) -> QueryState:
+        verdict = model.verify(
+            state["standalone_question"],
+            state["draft"],
+            state["context_chunks"],
+        )
+        logger.info(
+            "graph_node=verify supported=%s unsupported_count=%s",
+            verdict.supported,
+            len(verdict.unsupported_claims),
+        )
+        return {"verification": verdict}
+
+    def revise(state: QueryState) -> QueryState:
+        draft = model.revise(
+            state["standalone_question"],
+            state["draft"],
+            state["context_chunks"],
+            state["verification"].unsupported_claims,
+        )
+        sources = _validate_and_build_sources(
+            draft.answer,
+            draft.citation_ids,
+            state["context_chunks"],
+        )
+        revision_count = state.get("revision_count", 0) + 1
+        logger.info("graph_node=revise revision_count=%s", revision_count)
+        return {
+            "draft": draft,
+            "draft_sources": sources,
+            "revision_count": revision_count,
+        }
+
+    def finalize(state: QueryState) -> QueryState:
+        return {
+            "answer": state["draft"].answer,
+            "sources": state["draft_sources"],
             "status": AnswerStatus.ANSWERED,
         }
 
@@ -250,17 +310,33 @@ def build_query_workflow(
             "sources": [],
             "status": AnswerStatus.INSUFFICIENT_CONTEXT,
             "rewrite_count": state.get("rewrite_count", 0),
+            "web_attempted": state.get("web_attempted", False),
         }
 
     def route_after_grade(state: QueryState) -> RouteAfterGrade:
         if state.get("relevant_chunks"):
             return "generate"
+        if state.get("retrieval_origin") is SourceOrigin.WEB:
+            return "abstain"
         if state.get("rewrite_count", 0) < max_query_rewrites:
             return "rewrite"
+        if web_searcher is not None and not state.get("web_attempted", False):
+            return "search_web"
         return "abstain"
 
     def route_after_rewrite(state: QueryState) -> RouteAfterRewrite:
-        return "abstain" if state.get("rewrite_exhausted", False) else "retrieve"
+        if not state.get("rewrite_exhausted", False):
+            return "retrieve"
+        if web_searcher is not None and not state.get("web_attempted", False):
+            return "search_web"
+        return "abstain"
+
+    def route_after_verify(state: QueryState) -> RouteAfterVerify:
+        if state["verification"].supported:
+            return "finalize"
+        if state.get("revision_count", 0) < max_answer_revisions:
+            return "revise"
+        return "abstain"
 
     builder = StateGraph(
         QueryState,
@@ -274,25 +350,29 @@ def build_query_workflow(
     builder.add_node("retrieve", retrieve, **external_node_options)
     builder.add_node("grade", grade, **external_node_options)
     builder.add_node("rewrite", rewrite, **external_node_options)
+    builder.add_node("search_web", search_web, **external_node_options)
     builder.add_node("generate", generate, **external_node_options)
+    builder.add_node("verify", verify, **external_node_options)
+    builder.add_node("revise", revise, **external_node_options)
+    builder.add_node("finalize", finalize)
     builder.add_node("abstain", abstain)
     builder.add_edge(START, "analyze")
     builder.add_edge("analyze", "retrieve")
     builder.add_edge("retrieve", "grade")
     builder.add_conditional_edges("grade", route_after_grade)
     builder.add_conditional_edges("rewrite", route_after_rewrite)
-    builder.add_edge("generate", END)
+    builder.add_edge("search_web", "grade")
+    builder.add_edge("generate", "verify")
+    builder.add_conditional_edges("verify", route_after_verify)
+    builder.add_edge("revise", "verify")
+    builder.add_edge("finalize", END)
     builder.add_edge("abstain", END)
-    graph = builder.compile(
-        checkpointer=checkpointer,
-        name="technical-documentation-rag",
-    )
-    recursion_limit = 10 + (max_query_rewrites * 3)
+    graph = builder.compile(name="technical-documentation-rag")
+    recursion_limit = 16 + (max_query_rewrites * 3) + (max_answer_revisions * 2)
     return QueryWorkflow(
         graph,
         max_question_length=max_question_length,
         recursion_limit=recursion_limit,
-        on_complete=on_complete,
     )
 
 
@@ -348,6 +428,7 @@ def _validate_and_build_sources(
                 source=chunk.source,
                 source_kind=chunk.source_kind,
                 excerpt=excerpt,
+                origin=chunk.origin,
             )
         )
     return sources

@@ -47,3 +47,11 @@ class QueryValidationError(ApplicationError):
 
 class AnswerNotFoundError(ApplicationError):
     """Feedback references an answer that does not exist."""
+
+
+class SessionNotFoundError(ApplicationError):
+    """A query references a conversation session that does not exist."""
+
+
+class WebSearchError(ApplicationError):
+    """The optional web-search provider returned an unusable response."""
