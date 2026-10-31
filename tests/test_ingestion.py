@@ -79,3 +79,21 @@ def test_changed_document_replaces_old_chunk_version() -> None:
         include=[],
     )["ids"]
     assert len(stored_ids) == second.document.chunk_count
+
+
+def test_indexed_chunks_can_be_retrieved_with_source_metadata() -> None:
+    service, embeddings, store = _service()
+    created = service.ingest_file(
+        "guide.md",
+        b"# Dependencies\n\nUse Depends to declare a dependency.",
+    )
+
+    chunks = store.search_by_vector(
+        embeddings.embed_query("dependency"),
+        top_k=5,
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].document_id == created.document.document_id
+    assert chunks[0].title == "Dependencies"
+    assert chunks[0].heading == "Dependencies"

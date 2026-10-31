@@ -11,7 +11,7 @@ import chromadb
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 
-from app.documents import DocumentChunk, IndexedDocument, SourceKind
+from app.documents import DocumentChunk, IndexedDocument, RetrievedChunk, SourceKind
 from app.errors import IndexConfigurationError
 
 _SCHEMA_VERSION = 1
@@ -123,3 +123,44 @@ class ChromaDocumentStore:
                 )
             )
         return sorted(documents, key=lambda item: (item.title.lower(), item.document_id))
+
+    def search_by_vector(
+        self,
+        query_embedding: Sequence[float],
+        *,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        if self.collection.count() == 0:
+            return []
+        result = self.collection.query(
+            query_embeddings=[list(query_embedding)],
+            n_results=min(top_k, self.collection.count()),
+            include=["documents", "metadatas", "distances"],
+        )
+        ids = (result.get("ids") or [[]])[0]
+        documents = (result.get("documents") or [[]])[0]
+        metadatas = (result.get("metadatas") or [[]])[0]
+        distances = (result.get("distances") or [[]])[0]
+        chunks: list[RetrievedChunk] = []
+        for chunk_id, text, metadata, distance in zip(
+            ids,
+            documents,
+            metadatas,
+            distances,
+            strict=True,
+        ):
+            if text is None or metadata is None:
+                continue
+            chunks.append(
+                RetrievedChunk(
+                    chunk_id=chunk_id,
+                    document_id=str(metadata["document_id"]),
+                    title=str(metadata["title"]),
+                    source=str(metadata["source"]),
+                    source_kind=SourceKind(str(metadata["source_kind"])),
+                    heading=str(metadata["heading"]),
+                    text=text,
+                    distance=float(distance),
+                )
+            )
+        return chunks

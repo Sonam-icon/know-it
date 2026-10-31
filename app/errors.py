@@ -31,3 +31,15 @@ class EmptyDocumentError(DocumentLoadError):
 
 class IndexConfigurationError(ApplicationError):
     """The stored vector index is incompatible with current configuration."""
+
+
+class StructuredOutputError(ApplicationError):
+    """A model response did not match its required structured contract."""
+
+
+class CitationValidationError(ApplicationError):
+    """A generated answer cites evidence outside its approved context."""
+
+
+class QueryValidationError(ApplicationError):
+    """A question does not satisfy the query service contract."""

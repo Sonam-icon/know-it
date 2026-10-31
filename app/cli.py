@@ -10,6 +10,7 @@ from app.bootstrap import (
     build_document_loader,
     build_document_store,
     build_ingestion_service,
+    build_query_service,
 )
 from app.config import get_settings
 
@@ -50,6 +51,15 @@ def inspect_manifest(manifest_path: Path) -> None:
         print(f"{document.title}\t{len(chunks)} chunks\t{len(document.text)} characters")
 
 
+def query(question: str) -> None:
+    result = build_query_service(get_settings()).run(question)
+    print(result.answer)
+    if result.sources:
+        print("\nSources:")
+        for source in result.sources:
+            print(f"- [{source.citation_id}] {source.title} — {source.heading} ({source.source})")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Know-It corpus administration")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -69,12 +79,16 @@ def main() -> None:
         type=Path,
         default=Path("corpus/seed_urls.json"),
     )
+    query_parser = subparsers.add_parser("query", help="Run a question through the RAG graph")
+    query_parser.add_argument("question")
     arguments = parser.parse_args()
 
     if arguments.command == "seed":
         seed(arguments.manifest)
     elif arguments.command == "inspect":
         inspect_manifest(arguments.manifest)
+    elif arguments.command == "query":
+        query(arguments.question)
     else:
         list_documents()
 

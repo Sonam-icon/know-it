@@ -4,7 +4,8 @@ from app.chunking import TechnicalDocumentChunker
 from app.config import Settings
 from app.ingestion import IngestionService
 from app.loaders import DocumentLoader
-from app.providers import GeminiEmbeddingProvider
+from app.providers import GeminiEmbeddingProvider, GeminiQueryModel
+from app.query_workflow import QueryWorkflow, build_query_workflow
 from app.vector_store import ChromaDocumentStore
 
 
@@ -49,4 +50,22 @@ def build_ingestion_service(settings: Settings) -> IngestionService:
             embedding_model=embeddings.model_name,
             embedding_dimension=embeddings.dimension,
         ),
+    )
+
+
+def build_query_service(settings: Settings) -> QueryWorkflow:
+    embeddings = GeminiEmbeddingProvider(settings)
+    return build_query_workflow(
+        model=GeminiQueryModel(settings),
+        embeddings=embeddings,
+        retriever=build_document_store(
+            settings,
+            embedding_model=embeddings.model_name,
+            embedding_dimension=embeddings.dimension,
+        ),
+        top_k=settings.retrieval_top_k,
+        max_query_rewrites=settings.max_query_rewrites,
+        grading_concurrency=settings.grading_concurrency,
+        max_context_characters=settings.max_context_characters,
+        max_question_length=settings.max_question_length,
     )

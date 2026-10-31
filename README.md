@@ -2,7 +2,7 @@
 
 Know-It is a self-corrective retrieval-augmented generation (RAG) assistant for technical documentation. A user asks a natural-language question, the system improves the search query, retrieves relevant documentation chunks, grades each chunk for relevance, and generates an answer grounded in the accepted evidence. Answers include source references. If the indexed corpus cannot support an answer, the system returns an explicit insufficient-context response.
 
-The project is being implemented phase by phase. The application foundation and Phase 1 ingestion pipeline are implemented. Live corpus seeding requires GOOGLE_API_KEY; the loaders and chunker have already been validated against all five source pages without using model credits. The complete rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+The project is being implemented phase by phase. The application foundation, ingestion pipeline, and self-corrective LangGraph query workflow are implemented. Live corpus seeding and an end-to-end Gemini query require GOOGLE_API_KEY; deterministic tests cover the graph paths without using model credits. The complete rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ## What the project does
 
@@ -80,8 +80,8 @@ Persistent local Chroma and SQLite keep the take-home straightforward to run. Th
 | --- | --- | --- |
 | 0 | Project foundation, settings, API contracts, health endpoint | Complete |
 | 1 | Corpus, safe loaders, chunking, Gemini embeddings, Chroma ingestion | Implemented; live seed pending API key |
-| 2 | LangGraph query analysis, retrieval, grading, rewrite, generation | Next |
-| 3 | Required FastAPI routes and feedback persistence | Planned |
+| 2 | LangGraph query analysis, retrieval, grading, rewrite, generation | Implemented; live run pending API key |
+| 3 | Required FastAPI routes and feedback persistence | Next |
 | 4 | Retry policies, checkpoints, observability, operating limits | Planned |
 | 5 | Automated tests and retrieval/answer evaluation | Planned |
 | 6 | Final setup guide, API examples, and submission review | Planned |
@@ -100,7 +100,10 @@ app/
   ingestion.py    # ingestion use-case coordinator
   loaders.py      # bounded file and public URL loading
   main.py         # FastAPI application factory and health endpoint
-  providers.py    # Gemini embedding adapter
+  prompts.py      # versioned prompts for each model responsibility
+  providers.py    # Gemini embedding and structured chat adapters
+  query_workflow.py # typed LangGraph nodes, edges, and query service
+  rag.py          # query workflow domain and structured-output contracts
   schemas.py      # public API contracts
   vector_store.py # versioned Chroma document index
 corpus/
@@ -192,6 +195,26 @@ uv run python -m app.cli list
 ~~~
 
 Phase 1 accepts UTF-8 Markdown, plain text, and HTML. URL loading permits public HTTP and HTTPS destinations, validates every redirect, caps download size and redirects, removes page navigation, and retains headings, lists, tables, paragraphs, and code blocks. Chunks target 700 tokens with an 80-token overlap for oversized sections.
+
+## Query workflow
+
+After seeding the corpus, run a question through the LangGraph workflow:
+
+~~~bash
+uv run python -m app.cli query "How do FastAPI dependencies work?"
+~~~
+
+The graph performs these steps:
+
+1. Gemini produces a structured retrieval query and optional query type.
+2. The query is embedded and Chroma returns the top five chunks.
+3. Gemini grades each chunk independently; irrelevant chunks are removed.
+4. If nothing is relevant, Gemini creates a materially different query. The graph permits two rewrites and stops early when a rewrite repeats an earlier query.
+5. Relevant chunks are bounded to the configured context limit and passed to generation.
+6. The graph accepts the answer only when inline source markers and structured citation IDs match approved chunks.
+7. If the rewrite budget is exhausted, it returns an insufficient-context response with no sources.
+
+The original question remains unchanged throughout the graph. Retrieval results, grades, and relevant chunks are replaced on every loop, preventing evidence from an earlier failed search from leaking into generation.
 
 ## Required API surface
 

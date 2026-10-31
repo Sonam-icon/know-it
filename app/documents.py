@@ -63,3 +63,15 @@ class IndexedDocument:
 class IngestionResult:
     document: IndexedDocument
     status: IndexingStatus
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievedChunk:
+    chunk_id: str
+    document_id: str
+    title: str
+    source: str
+    source_kind: SourceKind
+    heading: str
+    text: str
+    distance: float
