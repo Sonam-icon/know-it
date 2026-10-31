@@ -223,3 +223,12 @@ def test_openapi_exposes_all_required_routes(api: ApiContext) -> None:
     paths = api.client.get("/openapi.json").json()["paths"]
 
     assert {"/query", "/ingest", "/documents", "/feedback"} <= set(paths)
+
+
+def test_request_id_is_preserved_for_correlation(api: ApiContext) -> None:
+    response = api.client.get(
+        "/documents",
+        headers={"X-Request-ID": "test-request-123"},
+    )
+
+    assert response.headers["X-Request-ID"] == "test-request-123"

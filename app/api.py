@@ -7,6 +7,7 @@ from typing import Annotated, Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from google.genai.errors import APIError
 from starlette.concurrency import run_in_threadpool
 
 from app.documents import IndexedDocument, IngestionResult
@@ -24,6 +25,7 @@ from app.errors import (
     UnsupportedDocumentError,
 )
 from app.rag import QueryResult
+from app.reliability import is_transient_error
 from app.repository import SQLiteRepository
 from app.schemas import (
     DocumentsResponse,
@@ -235,4 +237,14 @@ def _raise_application_error(exc: Exception) -> None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
+        ) from exc
+    if is_transient_error(exc):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A temporary external service failure exhausted its retry limit",
+        ) from exc
+    if isinstance(exc, APIError):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The model provider rejected the request",
         ) from exc

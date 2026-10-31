@@ -1,0 +1,122 @@
+[
+  {
+    "id": "path-parameter-types",
+    "category": "api_reference",
+    "question": "How does FastAPI validate a typed integer path parameter?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/path-params/"],
+    "expected_terms": ["int", "validation"],
+    "expect_abstention": false
+  },
+  {
+    "id": "fixed-path-order",
+    "category": "troubleshooting",
+    "question": "Why must /users/me be declared before /users/{user_id}?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/path-params/"],
+    "expected_terms": ["order"],
+    "expect_abstention": false
+  },
+  {
+    "id": "predefined-path-values",
+    "category": "how_to",
+    "question": "How can I restrict a path parameter to predefined values?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/path-params/"],
+    "expected_terms": ["enum"],
+    "expect_abstention": false
+  },
+  {
+    "id": "optional-query-parameter",
+    "category": "how_to",
+    "question": "How do I make a FastAPI query parameter optional?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/query-params/"],
+    "expected_terms": ["none"],
+    "expect_abstention": false
+  },
+  {
+    "id": "query-boolean-conversion",
+    "category": "conceptual",
+    "question": "Which string values can FastAPI convert to a boolean query parameter?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/query-params/"],
+    "expected_terms": ["true"],
+    "expect_abstention": false
+  },
+  {
+    "id": "required-query-parameter",
+    "category": "api_reference",
+    "question": "What makes a query parameter required in FastAPI?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/query-params/"],
+    "expected_terms": ["default"],
+    "expect_abstention": false
+  },
+  {
+    "id": "request-body-model",
+    "category": "how_to",
+    "question": "How do I declare a JSON request body with a Pydantic model?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/body/"],
+    "expected_terms": ["pydantic", "model"],
+    "expect_abstention": false
+  },
+  {
+    "id": "body-path-query-combination",
+    "category": "conceptual",
+    "question": "Can a FastAPI endpoint use path, query, and request body parameters together?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/body/"],
+    "expected_terms": ["path", "query"],
+    "expect_abstention": false
+  },
+  {
+    "id": "dependency-declaration",
+    "category": "how_to",
+    "question": "How do I declare a dependency with Depends?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/dependencies/"],
+    "expected_terms": ["depends"],
+    "expect_abstention": false
+  },
+  {
+    "id": "dependency-return-value",
+    "category": "conceptual",
+    "question": "What happens to the value returned by a FastAPI dependency?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/dependencies/"],
+    "expected_terms": ["return"],
+    "expect_abstention": false
+  },
+  {
+    "id": "raise-http-exception",
+    "category": "how_to",
+    "question": "How do I return a 404 error using HTTPException?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/handling-errors/"],
+    "expected_terms": ["httpexception", "404"],
+    "expect_abstention": false
+  },
+  {
+    "id": "custom-exception-handler",
+    "category": "how_to",
+    "question": "How can I install a custom exception handler in FastAPI?",
+    "expected_source_urls": ["https://fastapi.tiangolo.com/tutorial/handling-errors/"],
+    "expected_terms": ["exception_handler"],
+    "expect_abstention": false
+  },
+  {
+    "id": "websocket-abstention",
+    "category": "out_of_scope",
+    "question": "How do I create a WebSocket endpoint in FastAPI?",
+    "expected_source_urls": [],
+    "expected_terms": [],
+    "expect_abstention": true
+  },
+  {
+    "id": "oauth-abstention",
+    "category": "out_of_scope",
+    "question": "How do I implement OAuth2 password flow with JWT tokens?",
+    "expected_source_urls": [],
+    "expected_terms": [],
+    "expect_abstention": true
+  },
+  {
+    "id": "background-task-abstention",
+    "category": "out_of_scope",
+    "question": "How do I schedule a BackgroundTask after returning a response?",
+    "expected_source_urls": [],
+    "expected_terms": [],
+    "expect_abstention": true
+  }
+]

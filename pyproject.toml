@@ -37,6 +37,9 @@ packages = ["app"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = [
+    "live: calls external providers and spends API quota",
+]
 
 [tool.ruff]
 line-length = 100

@@ -2,7 +2,7 @@
 
 Know-It is a self-corrective retrieval-augmented generation (RAG) assistant for technical documentation. A user asks a natural-language question, the system improves the search query, retrieves relevant documentation chunks, grades each chunk for relevance, and generates an answer grounded in the accepted evidence. Answers include source references. If the indexed corpus cannot support an answer, the system returns an explicit insufficient-context response.
 
-The project is being implemented phase by phase. The application foundation, ingestion pipeline, self-corrective LangGraph workflow, and required FastAPI surface are implemented. Live corpus seeding and an end-to-end Gemini query require GOOGLE_API_KEY; deterministic tests cover the graph and API paths without using model credits. The complete rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+The required application phases are implemented: ingestion, the self-corrective LangGraph workflow, FastAPI routes, persistence, retries, checkpoints, observability, and an evaluation harness. Live corpus seeding and end-to-end Gemini evaluation require GOOGLE_API_KEY; deterministic tests cover the graph and API paths without using model credits. The complete rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ## What the project does
 
@@ -82,9 +82,9 @@ Persistent local Chroma and SQLite keep the take-home straightforward to run. Th
 | 1 | Corpus, safe loaders, chunking, Gemini embeddings, Chroma ingestion | Implemented; live seed pending API key |
 | 2 | LangGraph query analysis, retrieval, grading, rewrite, generation | Implemented; live run pending API key |
 | 3 | Required FastAPI routes and SQLite answer/feedback persistence | Complete |
-| 4 | Retry policies, checkpoints, observability, operating limits | Next |
-| 5 | Automated tests and retrieval/answer evaluation | Planned |
-| 6 | Final setup guide, API examples, and submission review | Planned |
+| 4 | Retry policies, checkpoints, observability, operating limits | Complete |
+| 5 | Automated tests and retrieval/answer evaluation | Harness complete; live run pending API key |
+| 6 | Final setup guide, API examples, and submission review | Complete; live completion gate pending |
 | Bonus | Groundedness check, memory, web fallback, UI | Deferred |
 
 ## Current project structure
@@ -93,23 +93,29 @@ Persistent local Chroma and SQLite keep the take-home straightforward to run. Th
 app/
   api.py          # required HTTP routes and error translation
   bootstrap.py    # dependency construction
+  checkpoints.py  # LangGraph SQLite lifecycle and retention
   chunking.py     # heading-aware, token-bounded splitting
   cli.py          # corpus seed, inspect, and list commands
   config.py       # validated environment configuration
   documents.py    # ingestion domain models
   errors.py       # application-level errors
+  evaluation.py   # versioned evaluation runner and report models
   ingestion.py    # ingestion use-case coordinator
   loaders.py      # bounded file and public URL loading
   main.py         # FastAPI application factory and health endpoint
+  observability.py # request IDs and operational logging
   prompts.py      # versioned prompts for each model responsibility
   providers.py    # Gemini embedding and structured chat adapters
   query_workflow.py # typed LangGraph nodes, edges, and query service
   rag.py          # query workflow domain and structured-output contracts
+  reliability.py  # transient failure classification and retry policy
   repository.py   # SQLite answer and feedback persistence
   schemas.py      # public API contracts
   vector_store.py # versioned Chroma document index
 corpus/
   seed_urls.json  # five official FastAPI documentation pages
+evaluation/
+  questions.json  # 15 supported and abstention evaluation cases
 tests/            # deterministic unit and integration tests
 .env.example      # documented configuration
 pyproject.toml    # dependencies and development tools
@@ -218,6 +224,58 @@ The graph performs these steps:
 
 The original question remains unchanged throughout the graph. Retrieval results, grades, and relevant chunks are replaced on every loop, preventing evidence from an earlier failed search from leaking into generation.
 
+## Reliability and state management
+
+Semantic retries and operational retries are tracked separately:
+
+- A semantic retry rewrites a query only when every retrieved chunk is irrelevant. Two rewrites allow at most three retrieval passes.
+- LangGraph retries external nodes only for network failures, timeouts, rate limits, temporary provider failures, and transient SQLite lock contention. Invalid input, authentication failures, schema errors, and programming errors are not retried.
+- Gemini calls use provider-level request timeouts. The installed LangGraph version supports graph node timeouts only for asynchronous nodes, while this workflow intentionally uses synchronous nodes behind FastAPI's thread pool.
+
+Every API query uses a new LangGraph thread ID. Intermediate states are stored in a dedicated SQLite checkpoint database, separate from answers and feedback. Completed threads are registered for retention cleanup and removed after seven days by default. Checkpoints support inspection and failure analysis; they are not reused as conversation memory.
+
+Each HTTP response includes an X-Request-ID header. Logs contain the request ID, method, path, status, latency, graph node, result counts, rewrite count, and citation count. Questions, document contents, credentials, and API keys are not written to operational logs.
+
+Resource limits cover question length, retrieval count, grading concurrency, generation context, upload bytes, fetched bytes, redirects, provider attempts, and provider timeout. All values are configurable through the environment.
+
+## Evaluation
+
+The versioned dataset contains 15 questions:
+
+- direct API and conceptual questions from all five corpus pages;
+- how-to and troubleshooting questions;
+- questions that combine multiple parameter concepts;
+- WebSocket, OAuth2, and background-task questions that should abstain.
+
+After seeding the corpus, run:
+
+~~~bash
+uv run python -m app.cli evaluate
+~~~
+
+The command writes data/evaluation.json and reports pass rate and average latency. Each case checks the expected answer status, source presence, expected documentation URL, required answer terms, and citation availability.
+
+Routine tests use deterministic model and vector-store fakes:
+
+~~~bash
+uv run pytest
+~~~
+
+The live smoke test is opt-in because it calls Gemini and consumes quota:
+
+~~~bash
+RUN_LIVE_TESTS=1 uv run pytest -m live
+~~~
+
+On PowerShell:
+
+~~~powershell
+$env:RUN_LIVE_TESTS = "1"
+uv run pytest -m live
+~~~
+
+It ingests a temporary Markdown document with Gemini embeddings and asks a question that must return a cited answer.
+
 ## API
 
 All required routes are registered in FastAPI and appear in the generated documentation at http://127.0.0.1:8000/docs.
@@ -306,3 +364,64 @@ curl -X POST http://127.0.0.1:8000/feedback \
 ~~~
 
 Feedback for an unknown answer returns HTTP 404. Invalid request bodies return 422, oversized uploads return 413, and unsupported file formats return 415.
+
+## Design decisions and tradeoffs
+
+### Explicit graph instead of a general agent
+
+The assignment has a known sequence and one controlled loop. Explicit nodes and conditional edges make state transitions, retry counts, and abstention behavior visible and testable. A free-form agent would add tool-selection behavior that is unnecessary for this use case.
+
+### LLM grading after vector retrieval
+
+Similarity search provides inexpensive candidate selection, while Gemini performs the semantic relevance decision required by the assignment. Grading every top-k chunk costs more than score-threshold filtering, so top-k and grading concurrency are bounded.
+
+### Heading-aware chunks
+
+Technical documentation depends on section hierarchy and nearby code. The splitter retains heading paths, keeps ordinary code blocks intact, and applies token overlap when a long section requires multiple chunks. The default target is 700 tokens with an 80-token overlap.
+
+### Deterministic document versions
+
+Document IDs derive from canonical sources, and chunk IDs include the document content hash. Re-ingesting unchanged content skips embedding. Changed content is embedded under new IDs before old chunks are removed, reducing the chance of losing a working version during replacement.
+
+### Local persistence behind narrow interfaces
+
+Chroma stores document vectors, one SQLite database stores answers and feedback, and another stores graph checkpoints. This is easy to run and explain for the take-home. A multi-instance deployment would replace them with server-backed services while retaining the service and graph boundaries.
+
+### Citation validation in application code
+
+The generator receives only graded chunks labeled S1, S2, and so on. Application code verifies that inline markers and structured citation IDs match and belong to that exact context. Unknown or inconsistent citations fail instead of being returned to the user.
+
+## Assumptions and current limitations
+
+- The initial knowledge base is intentionally limited to five English FastAPI pages.
+- Uploaded documents must be UTF-8 Markdown, plain text, or HTML.
+- Local Chroma and SQLite target a single application instance.
+- Changing the embedding model or dimension requires rebuilding the collection because vector spaces are incompatible.
+- Retrieval is dense semantic search only; keyword or hybrid retrieval could improve exact error-code and symbol searches.
+- Feedback is stored for later analysis but does not automatically change prompts or ranking.
+- Live quality and latency numbers remain pending until the corpus is seeded with a configured Gemini key.
+
+## Improvements with more time
+
+After the required live completion gate, the next improvements would be:
+
+1. add a groundedness verifier that checks answer claims against cited chunks;
+2. evaluate hybrid lexical and vector retrieval plus reranking;
+3. move Chroma, checkpoints, and feedback to shared production services;
+4. add authenticated ingestion and per-corpus access controls;
+5. add conversation memory with explicit session retention;
+6. add a small UI after the API behavior remains stable.
+
+Web fallback and conversation memory remain bonus work and are intentionally outside the required baseline.
+
+## Submission checklist
+
+- Install: uv sync --locked
+- Configure: copy .env.example to .env and set GOOGLE_API_KEY
+- Inspect corpus: uv run python -m app.cli inspect
+- Seed corpus: uv run python -m app.cli seed
+- Start API: uv run uvicorn app.main:app --reload
+- Run deterministic tests: uv run pytest
+- Run live smoke test: set RUN_LIVE_TESTS=1, then uv run pytest -m live
+- Run evaluation: uv run python -m app.cli evaluate
+- Review interactive API docs: http://127.0.0.1:8000/docs

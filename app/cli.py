@@ -13,6 +13,11 @@ from app.bootstrap import (
     build_query_service,
 )
 from app.config import get_settings
+from app.evaluation import (
+    load_evaluation_cases,
+    run_evaluation,
+    write_evaluation_summary,
+)
 
 
 def _load_manifest(path: Path) -> list[dict[str, Any]]:
@@ -60,6 +65,18 @@ def query(question: str) -> None:
             print(f"- [{source.citation_id}] {source.title} — {source.heading} ({source.source})")
 
 
+def evaluate(dataset_path: Path, output_path: Path) -> None:
+    cases = load_evaluation_cases(dataset_path)
+    summary = run_evaluation(build_query_service(get_settings()), cases)
+    write_evaluation_summary(summary, output_path)
+    print(
+        f"Passed {summary.passed}/{summary.total} cases "
+        f"({summary.pass_rate:.1%}); average latency "
+        f"{summary.average_latency_ms:.2f} ms"
+    )
+    print(f"Report: {output_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Know-It corpus administration")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -81,6 +98,20 @@ def main() -> None:
     )
     query_parser = subparsers.add_parser("query", help="Run a question through the RAG graph")
     query_parser.add_argument("question")
+    evaluate_parser = subparsers.add_parser(
+        "evaluate",
+        help="Run the versioned RAG evaluation dataset",
+    )
+    evaluate_parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=Path("evaluation/questions.json"),
+    )
+    evaluate_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/evaluation.json"),
+    )
     arguments = parser.parse_args()
 
     if arguments.command == "seed":
@@ -89,6 +120,8 @@ def main() -> None:
         inspect_manifest(arguments.manifest)
     elif arguments.command == "query":
         query(arguments.question)
+    elif arguments.command == "evaluate":
+        evaluate(arguments.dataset, arguments.output)
     else:
         list_documents()
 

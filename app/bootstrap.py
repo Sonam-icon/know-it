@@ -2,12 +2,14 @@
 
 from dataclasses import dataclass
 
+from app.checkpoints import SQLiteCheckpointManager
 from app.chunking import TechnicalDocumentChunker
 from app.config import Settings
 from app.ingestion import IngestionService
 from app.loaders import DocumentLoader
 from app.providers import GeminiEmbeddingProvider, GeminiQueryModel
 from app.query_workflow import QueryWorkflow, build_query_workflow
+from app.reliability import build_retry_policy
 from app.vector_store import ChromaDocumentStore
 
 
@@ -77,6 +79,7 @@ def build_query_service(settings: Settings) -> QueryWorkflow:
         grading_concurrency=settings.grading_concurrency,
         max_context_characters=settings.max_context_characters,
         max_question_length=settings.max_question_length,
+        retry_policy=build_retry_policy(settings),
     )
 
 
@@ -84,6 +87,7 @@ def build_runtime_services(
     settings: Settings,
     *,
     store: ChromaDocumentStore | None = None,
+    checkpoint_manager: SQLiteCheckpointManager | None = None,
 ) -> RuntimeServices:
     embeddings = GeminiEmbeddingProvider(settings)
     document_store = store or build_document_store(
@@ -106,6 +110,9 @@ def build_runtime_services(
         grading_concurrency=settings.grading_concurrency,
         max_context_characters=settings.max_context_characters,
         max_question_length=settings.max_question_length,
+        retry_policy=build_retry_policy(settings),
+        checkpointer=checkpoint_manager.saver if checkpoint_manager else None,
+        on_complete=checkpoint_manager.complete if checkpoint_manager else None,
     )
     return RuntimeServices(
         query=query,

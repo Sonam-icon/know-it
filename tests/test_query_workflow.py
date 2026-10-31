@@ -1,6 +1,8 @@
 from collections.abc import Sequence
 
 import pytest
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.types import RetryPolicy
 
 from app.documents import RetrievedChunk, SourceKind
 from app.errors import CitationValidationError, StructuredOutputError
@@ -120,6 +122,9 @@ def _workflow(
     *,
     max_rewrites: int = 2,
     max_context_characters: int = 10_000,
+    retry_policy: RetryPolicy | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    on_complete=None,
 ):
     return build_query_workflow(
         model=model,
@@ -130,6 +135,9 @@ def _workflow(
         grading_concurrency=1,
         max_context_characters=max_context_characters,
         max_question_length=2000,
+        retry_policy=retry_policy,
+        checkpointer=checkpointer,
+        on_complete=on_complete,
     )
 
 

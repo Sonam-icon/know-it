@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     max_query_rewrites: int = Field(default=2, ge=0, le=5)
     provider_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     provider_max_attempts: int = Field(default=3, ge=1, le=5)
+    retry_initial_interval_seconds: float = Field(default=0.5, gt=0, le=10)
+    retry_max_interval_seconds: float = Field(default=4.0, gt=0, le=60)
     grading_concurrency: int = Field(default=3, ge=1, le=10)
     max_question_length: int = Field(default=2000, ge=100, le=10_000)
     max_context_characters: int = Field(default=30_000, ge=1000, le=200_000)
@@ -45,6 +47,8 @@ class Settings(BaseSettings):
     chroma_collection: str = "technical_docs"
     application_db_path: Path = Path("data/application.sqlite3")
     checkpoint_db_path: Path = Path("data/checkpoints.sqlite3")
+    checkpoint_retention_days: int = Field(default=7, ge=1, le=90)
+    log_level: str = "INFO"
 
     @model_validator(mode="after")
     def validate_chunk_overlap(self) -> "Settings":

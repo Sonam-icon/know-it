@@ -6,8 +6,9 @@
 - **Phase 1 — Implemented:** reproducible corpus, safe loaders, heading-aware chunks, Gemini embedding adapter, versioned Chroma storage, and corpus CLI. Live seeding awaits GOOGLE_API_KEY in the runtime environment.
 - **Phase 2 — Implemented:** typed LangGraph state, analysis, vector retrieval, concurrent per-chunk grading, bounded rewrites, grounded generation, citation validation, and abstention. A live Gemini run awaits GOOGLE_API_KEY and a seeded index.
 - **Phase 3 — Complete:** required query, ingestion, document-listing, and feedback routes; typed responses; HTTP error mapping; SQLite answer and feedback persistence; and OpenAPI contract tests.
-- **Phase 4 — Next:** retry policies, checkpoints, observability, and operating limits.
-- **Phases 5–6 — Planned:** evaluation and submission review.
+- **Phase 4 — Complete:** narrow transient retries, provider timeouts, unique checkpoint threads, SQLite checkpoint retention, request correlation, structured graph metrics, and configurable resource limits.
+- **Phase 5 — Harness complete:** deterministic tests, a 15-case evaluation dataset, report generation, and an opt-in live ingestion/query smoke test. Live results await GOOGLE_API_KEY.
+- **Phase 6 — Complete:** final setup, architecture, API examples, design tradeoffs, assumptions, limitations, improvement path, and submission checklist. The live completion gate remains pending.
 - **Bonus work — Deferred:** begins only after the required completion gate passes.
 
 ## 1. Outcome and scope
