@@ -56,7 +56,8 @@ flowchart TD
     Grade --> Decision{Relevant chunks?}
     Decision -->|Yes| Generate[Generate cited draft]
     Generate --> Cite[Validate source references]
-    Cite --> Verify[Verify claims against evidence]
+    Cite -->|Valid| Verify[Verify claims against evidence]
+    Cite -->|Invalid, one repair remains| Generate
     Verify -->|Supported| Done([Answer with sources])
     Verify -->|Unsupported, revision remains| Revise[Revise draft once]
     Revise --> Cite
@@ -245,8 +246,8 @@ The graph performs these steps:
 3. Gemini grades each chunk independently; irrelevant chunks are removed.
 4. If nothing is relevant, Gemini creates a materially different query. The graph permits two rewrites and stops early when a rewrite repeats an earlier query.
 5. Relevant chunks are bounded to the configured context limit and passed to generation.
-6. The graph accepts the answer only when inline source markers and structured citation IDs match approved chunks.
-7. Gemini verifies the draft against the same evidence. One failed draft may be revised and verified again; a second failure abstains.
+6. The graph accepts the draft only when inline source markers and structured citation IDs match approved chunks. A malformed structured draft or citation contract gets one corrected generation attempt; a second failure returns 502.
+7. Gemini verifies the valid draft against the same evidence. One unsupported draft may be revised and verified again; a second verification failure abstains.
 8. After corpus rewrites are exhausted, an enabled Tavily adapter searches the configured official domains once. Web excerpts are graded and follow the same generation, citation, and verification path.
 9. If no path has relevant, supporting evidence, the graph returns an insufficient-context response with no sources.
 
@@ -254,9 +255,10 @@ The original question remains unchanged throughout the graph. Retrieval results,
 
 ## Reliability and state management
 
-The harness has three separate bounded recovery mechanisms:
+The harness has four separate bounded recovery mechanisms:
 
 - A semantic retry rewrites a query only when every retrieved chunk is irrelevant. Two rewrites allow at most three retrieval passes.
+- A generation repair retries once with the exact structured-output or citation-validation error; the invalid draft is never published.
 - A groundedness correction revises an unsupported generated draft once; it does not consume retrieval retries.
 - LangGraph retries external nodes only for network failures, timeouts, rate limits, temporary provider failures, and transient SQLite lock contention. Invalid input, authentication failures, schema errors, and programming errors are not retried.
 - Gemini calls use provider-level request timeouts. The installed LangGraph version supports graph node timeouts only for asynchronous nodes, while this workflow intentionally uses synchronous nodes behind FastAPI's thread pool.

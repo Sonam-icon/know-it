@@ -107,6 +107,7 @@ class QueryModel(Protocol):
         self,
         question: str,
         chunks: list[RetrievedChunk],
+        validation_feedback: str | None = None,
     ) -> AnswerDraft: ...
 
     def verify(

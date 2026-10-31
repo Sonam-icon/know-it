@@ -30,6 +30,7 @@ from app.rag import (
 )
 
 _CITATION_PATTERN = re.compile(r"\[(S\d+)\]")
+_MAX_GENERATION_VALIDATION_ATTEMPTS = 2
 _ABSTENTION = (
     "I could not find enough relevant information in the available documentation "
     "to answer this question."
@@ -247,12 +248,35 @@ def build_query_workflow(
             state.get("relevant_chunks", []),
             max_characters=max_context_characters,
         )
-        draft = model.generate(state["standalone_question"], context)
-        sources = _validate_and_build_sources(draft.answer, draft.citation_ids, context)
+        validation_feedback: str | None = None
+        for attempt in range(1, _MAX_GENERATION_VALIDATION_ATTEMPTS + 1):
+            try:
+                draft = model.generate(
+                    state["standalone_question"],
+                    context,
+                    validation_feedback,
+                )
+                sources = _validate_and_build_sources(
+                    draft.answer,
+                    draft.citation_ids,
+                    context,
+                )
+                break
+            except (StructuredOutputError, CitationValidationError) as exc:
+                logger.warning(
+                    "generation_validation_failed attempt=%s error_type=%s detail=%s",
+                    attempt,
+                    type(exc).__name__,
+                    exc,
+                )
+                if attempt == _MAX_GENERATION_VALIDATION_ATTEMPTS:
+                    raise
+                validation_feedback = str(exc)
         logger.info(
-            "graph_node=generate context_count=%s citation_count=%s",
+            "graph_node=generate context_count=%s citation_count=%s attempts=%s",
             len(context),
             len(sources),
+            attempt,
         )
         return {
             "context_chunks": context,

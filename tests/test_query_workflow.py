@@ -70,6 +70,7 @@ class FakeQueryModel:
         relevant_ids: set[str],
         rewrites: list[str] | None = None,
         draft: AnswerDraft | None = None,
+        generation_results: list[AnswerDraft | Exception] | None = None,
         revision: AnswerDraft | None = None,
         verdicts: list[GroundednessVerdict] | None = None,
         analysis_error: bool = False,
@@ -80,6 +81,8 @@ class FakeQueryModel:
             answer="Use the documented API. [S1]",
             citation_ids=["S1"],
         )
+        self.generation_results = list(generation_results or [self.draft])
+        self.generation_feedback: list[str | None] = []
         self.revision = revision or self.draft
         self.verdicts = list(
             verdicts or [GroundednessVerdict(supported=True, unsupported_claims=[])]
@@ -123,10 +126,16 @@ class FakeQueryModel:
         self,
         question: str,
         chunks: list[RetrievedChunk],
+        validation_feedback: str | None = None,
     ) -> AnswerDraft:
         del question
         self.generated_with = chunks
-        return self.draft
+        self.generation_feedback.append(validation_feedback)
+        index = min(len(self.generation_feedback) - 1, len(self.generation_results) - 1)
+        result = self.generation_results[index]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def verify(
         self,
@@ -262,6 +271,49 @@ def test_generation_rejects_unknown_citations() -> None:
 
     with pytest.raises(CitationValidationError, match="unknown source"):
         _workflow(model, retriever, FakeEmbeddings()).run("Question")
+
+    assert len(model.generation_feedback) == 2
+    assert "unknown source" in (model.generation_feedback[1] or "")
+
+
+def test_generation_repairs_a_citation_contract_failure_once() -> None:
+    invalid = AnswerDraft(answer="Missing inline marker.", citation_ids=["S1"])
+    corrected = AnswerDraft(answer="Corrected answer. [S1]", citation_ids=["S1"])
+    model = FakeQueryModel(
+        relevant_ids={"relevant"},
+        generation_results=[invalid, corrected],
+    )
+
+    result = _workflow(
+        model,
+        FakeRetriever([[_chunk("relevant")]]),
+        FakeEmbeddings(),
+    ).run("Question")
+
+    assert result.status is AnswerStatus.ANSWERED
+    assert result.answer == "Corrected answer. [S1]"
+    assert model.generation_feedback[0] is None
+    assert "Inline citations" in (model.generation_feedback[1] or "")
+
+
+def test_generation_repairs_a_structured_output_failure_once() -> None:
+    corrected = AnswerDraft(answer="Corrected answer. [S1]", citation_ids=["S1"])
+    model = FakeQueryModel(
+        relevant_ids={"relevant"},
+        generation_results=[
+            StructuredOutputError("Gemini response did not match AnswerDraft"),
+            corrected,
+        ],
+    )
+
+    result = _workflow(
+        model,
+        FakeRetriever([[_chunk("relevant")]]),
+        FakeEmbeddings(),
+    ).run("Question")
+
+    assert result.status is AnswerStatus.ANSWERED
+    assert "did not match AnswerDraft" in (model.generation_feedback[1] or "")
 
 
 def test_generation_context_is_bounded_before_the_model_call() -> None:

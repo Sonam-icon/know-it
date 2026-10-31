@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Annotated, Protocol
 from uuid import UUID, uuid4
@@ -44,6 +45,7 @@ from app.schemas import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class QueryRunner(Protocol):
@@ -261,6 +263,11 @@ def _raise_application_error(exc: Exception) -> None:
         exc,
         (StructuredOutputError, CitationValidationError, WebSearchError),
     ):
+        logger.warning(
+            "request_validation_failed error_type=%s detail=%s",
+            type(exc).__name__,
+            exc,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),

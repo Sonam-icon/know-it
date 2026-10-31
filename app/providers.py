@@ -77,7 +77,6 @@ class GeminiQueryModel:
         model = ChatGoogleGenerativeAI(
             model=settings.chat_model,
             api_key=settings.google_api_key,
-            temperature=0,
             retries=0,
             request_timeout=settings.provider_timeout_seconds,
         )
@@ -139,6 +138,7 @@ class GeminiQueryModel:
         self,
         question: str,
         chunks: list[RetrievedChunk],
+        validation_feedback: str | None = None,
     ) -> AnswerDraft:
         context_parts: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
@@ -150,11 +150,19 @@ class GeminiQueryModel:
             )
             context_parts.append(source)
         context = "\n\n---\n\n".join(context_parts)
+        correction = ""
+        if validation_feedback:
+            correction = (
+                "\n\nYour previous draft was rejected by application validation:\n"
+                f"{validation_feedback}\n"
+                "Return a fresh corrected draft. Ensure every citation ID exists in the "
+                "approved sources and the inline [S#] markers exactly match citation_ids."
+            )
         return self._invoke(
             self._generator,
             AnswerDraft,
             GENERATE_SYSTEM_PROMPT,
-            f"Question:\n{question}\n\nApproved sources:\n{context}",
+            f"Question:\n{question}\n\nApproved sources:\n{context}{correction}",
         )
 
     def verify(
