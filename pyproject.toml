@@ -13,16 +13,17 @@ dependencies = [
     "chromadb>=1.0,<2",
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
-    "langchain-chroma>=0.2,<2",
     "langchain-google-genai>=2.1,<5",
     "langchain-text-splitters>=0.3,<2",
     "langgraph>=0.6,<2",
-    "langgraph-checkpoint-sqlite>=2.0,<4",
     "pydantic-settings>=2.7,<3",
     "python-multipart>=0.0.20,<1",
     "tiktoken>=0.9,<1",
     "uvicorn[standard]>=0.34,<1",
 ]
+
+[project.optional-dependencies]
+ui = ["streamlit>=1.42,<2"]
 
 [dependency-groups]
 dev = [
