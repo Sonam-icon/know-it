@@ -35,8 +35,19 @@ class QueryRewrite(StructuredModel):
 
 
 class AnswerDraft(StructuredModel):
-    answer: str = Field(min_length=1)
-    citation_ids: list[str] = Field(min_length=1)
+    answer: str = Field(
+        min_length=1,
+        description=(
+            "Detailed technical answer. You MUST include inline citation markers such as "
+            "[S1] or [S2] immediately after each factual claim."
+        ),
+    )
+    citation_ids: list[str] = Field(
+        min_length=1,
+        description=(
+            "List of unique source IDs (e.g. ['S1']) that appear as inline markers in the answer."
+        ),
+    )
 
 
 class GroundednessVerdict(StructuredModel):

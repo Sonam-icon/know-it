@@ -419,6 +419,13 @@ def _bounded_context(
     return selected
 
 
+def _extract_citation_ids(answer: str) -> set[str]:
+    marker_ids: set[str] = set()
+    for bracket in re.findall(r"\[([^\]]+)\]", answer):
+        marker_ids.update(re.findall(r"\bS\d+\b", bracket))
+    return marker_ids
+
+
 def _validate_and_build_sources(
     answer: str,
     citation_ids: list[str],
@@ -426,7 +433,7 @@ def _validate_and_build_sources(
 ) -> list[AnswerSource]:
     known = {f"S{index}": chunk for index, chunk in enumerate(chunks, start=1)}
     unique_ids = list(dict.fromkeys(citation_ids))
-    marker_ids = set(_CITATION_PATTERN.findall(answer))
+    marker_ids = _extract_citation_ids(answer)
     claimed_ids = set(unique_ids)
     unknown = (marker_ids | claimed_ids) - set(known)
     if unknown:

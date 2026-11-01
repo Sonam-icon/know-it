@@ -30,6 +30,8 @@ Add an inline citation such as [S1] after every factual claim supported by a sou
 Use only source IDs present in the context. If the sources support only part of the
 question, answer that part and state what the sources do not establish. Return the
 unique source IDs used in citation_ids.
+Every citation ID in citation_ids MUST appear as an inline [S#] marker in the answer text,
+and every inline [S#] marker in the answer text MUST be listed in citation_ids.
 """.strip()
 
 VERIFY_SYSTEM_PROMPT = """
@@ -44,4 +46,6 @@ You revise a technical answer using only the supplied approved source chunks.
 Remove or correct every listed unsupported claim. Preserve useful supported content
 and add an inline citation such as [S1] after every factual claim. Use only source IDs
 present in the context and return the unique IDs used in citation_ids.
+Every citation ID in citation_ids MUST appear as an inline [S#] marker in the answer text,
+and every inline [S#] marker in the answer text MUST be listed in citation_ids.
 """.strip()

@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import re
 import socket
+import time
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -227,51 +228,64 @@ class DocumentLoader:
 
     def load_url(self, url: str) -> LoadedDocument:
         current_url = validate_public_url(url)
-        with httpx.Client(
-            follow_redirects=False,
-            timeout=self.fetch_timeout_seconds,
-            headers={"User-Agent": "Know-It/0.1 documentation indexer"},
-        ) as client:
-            for redirect_count in range(self.max_fetch_redirects + 1):
-                with client.stream("GET", current_url) as response:
-                    if response.status_code in _REDIRECT_STATUSES:
-                        location = response.headers.get("location")
-                        if location is None:
-                            raise DocumentLoadError("Redirect response did not include a location")
-                        if redirect_count >= self.max_fetch_redirects:
-                            raise DocumentLoadError("URL exceeded the redirect limit")
-                        current_url = validate_public_url(urljoin(current_url, location))
-                        continue
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            transport = httpx.HTTPTransport(local_address="0.0.0.0") if attempt > 0 else None
+            try:
+                with httpx.Client(
+                    transport=transport,
+                    follow_redirects=False,
+                    timeout=self.fetch_timeout_seconds,
+                    headers={"User-Agent": "Know-It/0.1 documentation indexer"},
+                ) as client:
+                    for redirect_count in range(self.max_fetch_redirects + 1):
+                        with client.stream("GET", current_url) as response:
+                            if response.status_code in _REDIRECT_STATUSES:
+                                location = response.headers.get("location")
+                                if location is None:
+                                    raise DocumentLoadError(
+                                        "Redirect response did not include a location"
+                                    )
+                                if redirect_count >= self.max_fetch_redirects:
+                                    raise DocumentLoadError("URL exceeded the redirect limit")
+                                current_url = validate_public_url(urljoin(current_url, location))
+                                continue
 
-                    try:
-                        response.raise_for_status()
-                    except httpx.HTTPStatusError as exc:
-                        raise DocumentLoadError(
-                            f"URL returned HTTP {response.status_code}"
-                        ) from exc
+                            try:
+                                response.raise_for_status()
+                            except httpx.HTTPStatusError as exc:
+                                raise DocumentLoadError(
+                                    f"URL returned HTTP {response.status_code}"
+                                ) from exc
 
-                    media_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-                    if media_type not in _ALLOWED_CONTENT_TYPES:
-                        raise UnsupportedDocumentError(
-                            f"Unsupported URL content type: {media_type or '(missing)'}"
-                        )
-                    content_length = response.headers.get("content-length")
-                    if content_length and int(content_length) > self.max_fetch_bytes:
-                        raise DocumentTooLargeError(
-                            f"URL exceeds the {self.max_fetch_bytes}-byte fetch limit"
-                        )
-                    body = bytearray()
-                    for part in response.iter_bytes():
-                        body.extend(part)
-                        if len(body) > self.max_fetch_bytes:
-                            raise DocumentTooLargeError(
-                                f"URL exceeds the {self.max_fetch_bytes}-byte fetch limit"
-                            )
-                    final_url = canonicalize_url(str(response.url))
-                    encoding = response.encoding or "utf-8"
-                    break
-            else:  # pragma: no cover - the bounded loop always exits or raises
-                raise DocumentLoadError("Unable to load URL")
+                            raw_content_type = response.headers.get("content-type", "")
+                            media_type = raw_content_type.split(";", 1)[0].lower()
+                            if media_type not in _ALLOWED_CONTENT_TYPES:
+                                raise UnsupportedDocumentError(
+                                    f"Unsupported URL content type: {media_type or '(missing)'}"
+                                )
+                            content_length = response.headers.get("content-length")
+                            if content_length and int(content_length) > self.max_fetch_bytes:
+                                raise DocumentTooLargeError(
+                                    f"URL exceeds the {self.max_fetch_bytes}-byte fetch limit"
+                                )
+                            body = bytearray()
+                            for part in response.iter_bytes():
+                                body.extend(part)
+                                if len(body) > self.max_fetch_bytes:
+                                    raise DocumentTooLargeError(
+                                        f"URL exceeds the {self.max_fetch_bytes}-byte fetch limit"
+                                    )
+                            final_url = canonicalize_url(str(response.url))
+                            encoding = response.encoding or "utf-8"
+                            break
+                    else:  # pragma: no cover - the bounded loop always exits or raises
+                        raise DocumentLoadError("Unable to load URL")
+                break
+            except httpx.TransportError:
+                if attempt == max_attempts - 1:
+                    raise
+                time.sleep(0.5)
 
         try:
             decoded = bytes(body).decode(encoding)
