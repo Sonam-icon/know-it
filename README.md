@@ -1,355 +1,82 @@
 # Know-It
 
-Know-It is a self-corrective retrieval-augmented generation (RAG) assistant for technical documentation. It resolves a question into a standalone search query, retrieves and grades evidence, generates a cited draft, and verifies the draft against that evidence before returning it. It supports bounded follow-up memory, an optional allowlisted Tavily fallback, and a small Streamlit client. If neither indexed nor web evidence can support an answer, it returns an explicit insufficient-context response.
-
-The required phases and all four bonus features are implemented. The five-page FastAPI corpus has been indexed locally, and the opt-in Gemini ingestion/query smoke test has passed. The full 15-case evaluation and live Tavily checks have not yet been completed; deterministic tests cover the graph, API, persistence, web adapter, and UI client. The rationale and acceptance criteria are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
-
-## What the project does
-
-The application can:
-
-- ingest Markdown, text, or HTML documentation from an uploaded file or URL;
-- split technical content into heading-aware chunks and index Gemini embeddings in ChromaDB;
-- analyze and rewrite questions for better retrieval;
-- grade every retrieved chunk before allowing it into the generation context;
-- retry weak retrieval with a bounded query-rewrite loop;
-- generate answers with validated references to indexed source chunks;
-- verify generated claims and revise a failed draft once before abstaining;
-- resolve follow-up questions from a bounded, persisted session history;
-- search allowlisted official documentation through Tavily after corpus retries are exhausted;
-- abstain when the available documents do not contain enough evidence;
-- expose query, ingestion, document-listing, and feedback operations through FastAPI;
-- provide an optional Streamlit chat and feedback interface.
-
-The initial corpus consists of five focused pages from the official FastAPI documentation, listed in [corpus/seed_urls.json](corpus/seed_urls.json). This deliberately narrow scope makes retrieval quality and abstention behavior easy to evaluate.
+Know-It answers questions about technical documentation with cited sources. It retrieves relevant passages, asks Gemini to grade them, and answers only from approved evidence. When the documents cannot support an answer, it returns `insufficient_context`. The initial corpus is five pages from the official FastAPI documentation, listed in [corpus/seed_urls.json](corpus/seed_urls.json).
 
 ## Architecture
 
-~~~mermaid
-flowchart LR
-    Client[API client or Streamlit] --> API[FastAPI API]
-
-    API --> QueryService[Query service]
-    API --> IngestionService[Ingestion service]
-    API --> Repository[(SQLite answers, sessions, and feedback)]
-
-    QueryService --> Graph[LangGraph StateGraph]
-    Graph --> GeminiChat[Gemini chat model]
-    Graph --> VectorStore[(ChromaDB)]
-    Graph -. optional fallback .-> Tavily[Tavily official-doc search]
-
-    IngestionService --> Loader[File and URL loaders]
-    Loader --> Chunker[Heading-aware chunker]
-    Chunker --> GeminiEmbeddings[Gemini embeddings]
-    GeminiEmbeddings --> VectorStore
-~~~
-
-The HTTP layer owns validation and status codes. Application services coordinate use cases. LangGraph owns query state and routing. Provider and storage clients are injected at application startup so each component can be tested independently.
-
-### Query workflow
-
-~~~mermaid
+```mermaid
 flowchart TD
-    Start([Question plus bounded history]) --> Analyze[Resolve standalone question and search query]
-    Analyze --> Retrieve[Retrieve top-k chunks]
-    Retrieve --> Grade[Grade every chunk]
-    Grade --> Decision{Relevant chunks?}
-    Decision -->|Yes| Generate[Generate cited draft]
-    Generate --> Cite[Validate source references]
-    Cite -->|Valid| Verify[Verify claims against evidence]
-    Cite -->|Invalid, one repair remains| Generate
-    Cite -->|Invalid, repair exhausted| ProviderError[Return service error]
-    Verify -->|Supported| Done([Answer with sources])
-    Verify -->|Unsupported, revision remains| Revise[Revise draft once]
-    Revise --> Cite
-    Verify -->|Still unsupported| Abstain
-    Decision -->|No, retry budget remains| Rewrite[Rewrite search query]
+    Docs[Files or documentation URLs] --> Ingest[Load, split, and embed]
+    Ingest --> Chroma[(Local ChromaDB)]
+    Client[API client or Streamlit] --> API[FastAPI]
+    API --> Graph[LangGraph StateGraph]
+    Graph --> Analyze[Analyze question]
+    Analyze --> Retrieve[Retrieve top five chunks]
+    Chroma --> Retrieve
+    Retrieve --> Grade[Gemini grades each chunk]
+    Grade -->|Relevant chunks| Generate[Generate cited draft]
+    Grade -->|None; rewrite budget remains| Rewrite[Rewrite query]
     Rewrite --> Retrieve
-    Decision -->|No, retry budget exhausted and web enabled| Web[Search Tavily once]
-    Web --> WebGrade[Grade web excerpts]
-    WebGrade -->|Relevant| Generate
-    WebGrade -->|Irrelevant| Abstain[Return insufficient context]
-    Decision -->|No web fallback| Abstain
-    Abstain --> Done
-~~~
+    Grade -->|None; budget exhausted| Fallback[Optional Tavily search or abstain]
+    Fallback -->|Relevant web evidence| Generate
+    Fallback -->|No supporting evidence| Abstain[Insufficient context]
+    Generate --> Check[Validate citations and verify claims]
+    Check -->|Supported| Answer[Answer with sources]
+    Check -->|Unsupported; one revision| Revise[Revise draft]
+    Revise --> Check
+    Check -->|Still unsupported| Abstain
+```
 
-Semantic rewrites, answer revision, and operational retries have independent counters. Every loop and external fallback is bounded.
+The graph keeps the original question, current search query, retrieved chunks, relevance grades, approved chunks, and `rewrite_count` in a typed state. It allows at most two query rewrites. Temporary provider failures use separate bounded node retries, so they do not consume the rewrite budget. Citation IDs must match approved chunks; a groundedness check can revise a draft once before abstaining. Each query starts with fresh graph state.
 
-## Technology choices
+I keep the boundaries simple: FastAPI handles HTTP validation, ingestion prepares documents, Chroma stores vectors, and LangGraph controls answer routing. Gemini supplies chat responses and embeddings. SQLite stores returned answers, feedback, and up to three completed turns for follow-up questions. Prior chat helps interpret a question but is never treated as evidence. I explain the build sequence in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
-| Area | Tool | Role |
-| --- | --- | --- |
-| API | FastAPI and Pydantic | HTTP endpoints, validation, and OpenAPI |
-| Workflow | LangGraph | Typed state, nodes, conditional routing, and retries |
-| Generation and grading | Google Gemini | Query analysis, relevance grading, and answers |
-| Embeddings | Gemini Embeddings | Vector representations for documents and queries |
-| Vector search | ChromaDB | Persistent local similarity search |
-| Web fallback | Tavily | Optional allowlisted official-documentation search |
-| Operational data | SQLite | Answers, bounded session history, and feedback |
-| UI | Streamlit | Optional API-only chat client |
-| Tests and quality | pytest and Ruff | Deterministic tests, linting, and formatting |
+## Setup and run
 
-Persistent local Chroma and SQLite keep the take-home straightforward to run on one machine.
+Use Python 3.11 and [uv](https://docs.astral.sh/uv/). Install the locked dependencies and create a local configuration file:
 
-## Implementation status
-
-| Phase | Scope | Status |
-| --- | --- | --- |
-| 0 | Project foundation, settings, API contracts, health endpoint | Complete |
-| 1 | Corpus, safe loaders, chunking, Gemini embeddings, Chroma ingestion | Complete; five official pages indexed locally |
-| 2 | LangGraph query analysis, retrieval, grading, rewrite, generation | Implemented; one-document live smoke test passed |
-| 3 | Required FastAPI routes and SQLite answer/feedback persistence | Complete |
-| 4 | Bounded retries, fresh graph state, and local limits | Complete |
-| 5 | Automated tests and retrieval/answer evaluation | Tests and evaluation harness complete; full corpus evaluation pending |
-| 6 | Final setup guide, API examples, and submission review | Documentation complete; final live acceptance pending |
-| Bonus | Groundedness check, session memory, Tavily fallback, Streamlit UI | Implemented; live Tavily and UI checks pending |
-
-## Current project structure
-
-~~~text
-app/
-  api.py          # required HTTP routes and error translation
-  bootstrap.py    # dependency construction
-  chunking.py     # heading-aware, token-bounded splitting
-  cli.py          # corpus seed, inspect, and list commands
-  config.py       # validated environment configuration
-  documents.py    # ingestion domain models
-  errors.py       # application-level errors
-  evaluation.py   # versioned evaluation runner and report models
-  ingestion.py    # ingestion use-case coordinator
-  loaders.py      # bounded file and public URL loading
-  main.py         # FastAPI application factory and health endpoint
-  prompts.py      # versioned prompts for each model responsibility
-  providers.py    # Gemini embedding and structured chat adapters
-  query_workflow.py # typed LangGraph nodes, edges, and query service
-  rag.py          # query workflow domain and structured-output contracts
-  reliability.py  # transient failure classification and retry policy
-  repository.py   # SQLite answer, session-history, and feedback persistence
-  schemas.py      # public API contracts
-  ui.py           # optional Streamlit interface
-  ui_client.py    # small HTTP client used by Streamlit
-  vector_store.py # versioned Chroma document index
-  web_search.py   # bounded, allowlisted Tavily adapter
-corpus/
-  seed_urls.json  # five official FastAPI documentation pages
-evaluation/
-  questions.json  # 15 supported and abstention evaluation cases
-tests/            # deterministic unit and integration tests
-.env.example      # documented configuration
-pyproject.toml    # dependencies and development tools
-~~~
-
-Each module represents a step or boundary that can be explained independently. The graph itself lives in one file.
-
-## Development setup
-
-Requirements:
-
-- Python 3.11
-- [uv](https://docs.astral.sh/uv/)
-- a Gemini API key for live ingestion and query phases
-- optionally, a Tavily key to enable official-documentation fallback
-
-Install the locked dependencies:
-
-~~~bash
+```bash
 uv sync --locked
-~~~
-
-Create local configuration:
-
-~~~bash
 cp .env.example .env
-~~~
+```
 
-On PowerShell:
+On PowerShell, use `Copy-Item .env.example .env` for the second command. Set `GOOGLE_API_KEY` in `.env` for ingestion and queries. The setting accepts one key or comma-separated keys, used in round-robin order; every key must have access to the configured models. To enable optional web fallback, set `TAVILY_API_KEY` and `WEB_FALLBACK_ENABLED=true`. Chroma runs locally at `CHROMA_PATH` and needs no Chroma API key. The `.env` file and local data are ignored by Git.
 
-~~~powershell
-Copy-Item .env.example .env
-~~~
+Seed the five documentation pages, then start the API:
 
-Set `GOOGLE_API_KEY` in `.env`. It accepts either one key or multiple comma-separated keys; chat and embedding calls select keys round-robin with thread-safe counters. To enable web fallback, also set `TAVILY_API_KEY` and change `WEB_FALLBACK_ENABLED=true`. The application can start without either key for local contract tests; live ingestion and queries require Gemini. Chroma runs locally at `CHROMA_PATH`, so this design does not require a Chroma API key.
-
-~~~env
-GOOGLE_API_KEY=key-one,key-two,key-three
-~~~
-
-Multiple keys increase available quota only when Google applies quota independently to those keys or their projects; keys from the same quota pool may not increase the effective limit.
-
-Every key in the pool must be authorized for the configured chat and embedding models. A rejected key currently fails that request; rotation does not silently skip it. Validate the configured pool before running the full evaluation.
-
-Run the current API:
-
-~~~bash
+```bash
+uv run python -m app.cli seed
 uv run uvicorn app.main:app --reload
-~~~
+```
 
-Install and launch the optional UI in a second terminal:
+The API is available at `http://127.0.0.1:8000`, with interactive documentation at `/docs`. Seeding again skips unchanged pages. The ingestion endpoint accepts UTF-8 Markdown, plain text, and HTML. For the optional Streamlit UI, run these commands in another terminal:
 
-~~~bash
+```bash
 uv sync --locked --extra ui
 uv run --extra ui streamlit run app/ui.py
-~~~
+```
 
-The UI calls `http://127.0.0.1:8000` by default. Override it with `KNOW_IT_API_URL`; Gemini and Tavily credentials remain only in the API process.
+The UI calls the FastAPI server and does not need the Gemini or Tavily keys itself.
 
-Check application health:
+## API examples
 
-~~~bash
-curl http://127.0.0.1:8000/health
-~~~
+The `curl` examples below use Bash syntax. On PowerShell, use the interactive `/docs` page or `Invoke-RestMethod`.
 
-Expected response:
+### Ask a question — `POST /query`
 
-~~~json
-{
-  "status": "ok",
-  "version": "0.1.0",
-  "provider_configured": true
-}
-~~~
-
-Run quality checks:
-
-~~~bash
-uv run ruff check .
-uv run pytest
-~~~
-
-## Corpus ingestion
-
-Inspect the real corpus without calling Gemini or writing to Chroma:
-
-~~~bash
-uv run python -m app.cli inspect
-~~~
-
-Once GOOGLE_API_KEY is configured, load and embed all five seed pages:
-
-~~~bash
-uv run python -m app.cli seed
-~~~
-
-The seed operation is idempotent. An unchanged document reuses its indexed chunks without another embedding call. A changed document is embedded under versioned chunk IDs before stale chunks are removed.
-
-List the documents currently stored in Chroma:
-
-~~~bash
-uv run python -m app.cli list
-~~~
-
-Phase 1 accepts UTF-8 Markdown, plain text, and HTML. URL loading permits public HTTP and HTTPS destinations, validates every redirect, caps download size and redirects, removes page navigation, and retains headings, lists, tables, paragraphs, and code blocks. Chunks target 700 tokens with an 80-token overlap for oversized sections.
-
-## Query workflow
-
-After seeding the corpus, run a question through the LangGraph workflow:
-
-~~~bash
-uv run python -m app.cli query "How do FastAPI dependencies work?"
-~~~
-
-The graph performs these steps:
-
-1. Gemini resolves the current message and up to three prior completed turns into a standalone question and retrieval query.
-2. The query is embedded and Chroma returns the top five chunks.
-3. Gemini grades each chunk independently; irrelevant chunks are removed.
-4. If nothing is relevant, Gemini creates a materially different query. The graph permits two rewrites and stops early when a rewrite repeats an earlier query.
-5. Relevant chunks are bounded to the configured context limit and passed to generation.
-6. The graph accepts the draft only when inline source markers and structured citation IDs match approved chunks. A malformed structured draft or citation contract gets one corrected generation attempt; a second failure returns 502.
-7. Gemini verifies the valid draft against the same evidence. One unsupported draft may be revised and verified again; a second verification failure abstains.
-8. After corpus rewrites are exhausted, an enabled Tavily adapter searches the configured official domains once. Web excerpts are graded and follow the same generation, citation, and verification path.
-9. If no path has relevant, supporting evidence, the graph returns an insufficient-context response with no sources.
-
-The original question remains unchanged throughout the graph. Retrieval results, grades, and relevant chunks are replaced on every loop, preventing evidence from an earlier failed search from leaking into generation.
-
-## Reliability and state management
-
-The harness has four separate bounded recovery mechanisms:
-
-- A semantic retry rewrites a query only when every retrieved chunk is irrelevant. Two rewrites allow at most three retrieval passes.
-- A generation repair retries once with the exact structured-output or citation-validation error; the invalid draft is never published.
-- A groundedness correction revises an unsupported generated draft once; it does not consume retrieval retries.
-- LangGraph retries external nodes only for network failures, timeouts, rate limits, temporary provider failures, and transient SQLite lock contention. Invalid input, authentication failures, schema errors, and programming errors are not retried.
-- Gemini calls use provider-level request timeouts. The installed LangGraph version supports graph node timeouts only for asynchronous nodes, while this workflow intentionally uses synchronous nodes behind FastAPI's thread pool.
-
-LangGraph keeps state in memory for one query invocation and compiles without a checkpointer. SQLite supplies only the last three completed turns, under a character budget, to the analysis node. History helps resolve a follow-up but is never generation evidence; every turn must retrieve and grade current documentation. This keeps graph execution stateless while still supporting local single-instance sessions.
-
-Simple logs record graph steps, result counts, rewrite count, and citation count. Questions, document contents, credentials, and API keys are not written to operational logs.
-
-Resource limits cover question length, retrieval count, generation context, upload bytes, fetched bytes, redirects, provider attempts, and provider timeout. Grading runs sequentially over the small top-k set.
-
-## Evaluation
-
-The versioned dataset contains 15 questions:
-
-- direct API and conceptual questions from all five corpus pages;
-- how-to and troubleshooting questions;
-- questions that combine multiple parameter concepts;
-- WebSocket, OAuth2, and background-task questions that should abstain.
-
-After seeding the corpus, run:
-
-~~~bash
-uv run python -m app.cli evaluate
-~~~
-
-The command writes data/evaluation.json and reports pass rate and average latency. Each case checks the expected answer status, source presence, expected documentation URL, required answer terms, and citation availability. These are lightweight acceptance checks, not measured retrieval precision, recall, MRR, nDCG, or independently judged answer faithfulness. Those metrics require labeled relevant chunks or claim-level judgments, which this dataset does not provide. No full-corpus pass rate is claimed until the live evaluation succeeds.
-
-Routine tests use deterministic model and vector-store fakes:
-
-~~~bash
-uv run pytest
-~~~
-
-The live smoke test is opt-in because it calls Gemini and consumes quota:
-
-~~~bash
-RUN_LIVE_TESTS=1 uv run pytest -m live
-~~~
-
-On PowerShell:
-
-~~~powershell
-$env:RUN_LIVE_TESTS = "1"
-uv run pytest -m live
-~~~
-
-It ingests a temporary Markdown document with Gemini embeddings and asks a question that must return a cited answer.
-
-## API
-
-All required routes are registered in FastAPI and appear in the generated documentation at http://127.0.0.1:8000/docs.
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| POST | /query | Submit a question and receive an answer with sources |
-| POST | /ingest | Ingest a file or URL |
-| GET | /documents | List indexed documents |
-| POST | /feedback | Record thumbs up/down feedback and an optional comment |
-
-GET /health is also available as an operational endpoint. Without GOOGLE_API_KEY, health and document listing remain available while query and ingestion return HTTP 503.
-
-### Submit a question
-
-~~~bash
+```bash
 curl -X POST http://127.0.0.1:8000/query \
   -H "Content-Type: application/json" \
   -d '{"question":"How do FastAPI dependencies work?"}'
-~~~
+```
 
-The `curl` examples use Bash syntax. In PowerShell, the equivalent query is:
+Example response (IDs and text are illustrative):
 
-~~~powershell
-Invoke-RestMethod -Uri http://127.0.0.1:8000/query -Method Post -ContentType 'application/json' -Body '{"question":"How do FastAPI dependencies work?"}'
-~~~
-
-Example response:
-
-~~~json
+```json
 {
   "answer_id": "93b9c7a6-aa54-4e98-bf00-b3877bc9f185",
   "session_id": "4ef42a80-e0ce-419c-98e5-991b48d092a6",
-  "answer": "Declare a dependency with Depends and a callable. [S1]",
+  "answer": "Declare a callable with Depends to provide a dependency. [S1]",
   "status": "answered",
   "sources": [
     {
@@ -367,35 +94,22 @@ Example response:
   "rewrite_count": 0,
   "web_attempted": false
 }
-~~~
+```
 
-The server stores the answer before returning its IDs. Send the returned `session_id` with the next question to enable follow-up resolution:
+Send the returned `session_id` with a later question to use follow-up memory. An unsupported question returns `status: "insufficient_context"` and an empty `sources` list.
 
-~~~bash
-curl -X POST http://127.0.0.1:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{"question":"What is its default behavior?","session_id":"4ef42a80-e0ce-419c-98e5-991b48d092a6"}'
-~~~
+### Add a document — `POST /ingest`
 
-Omitting `session_id` starts a new session; an unknown supplied session returns 404. A source has `origin: "web"` only when the optional Tavily path supplied its evidence.
+Send exactly one URL or file as multipart form data:
 
-### Ingest a URL or file
-
-The endpoint accepts multipart form data with exactly one source:
-
-~~~bash
+```bash
 curl -X POST http://127.0.0.1:8000/ingest \
   -F "url=https://fastapi.tiangolo.com/tutorial/dependencies/"
-~~~
+```
 
-~~~bash
-curl -X POST http://127.0.0.1:8000/ingest \
-  -F "file=@path/to/your-guide.md;type=text/markdown"
-~~~
+For a file, use `-F "file=@path/to/guide.md;type=text/markdown"` instead of the URL field.
 
-Example response:
-
-~~~json
+```json
 {
   "document_id": "document-hash",
   "title": "Dependencies",
@@ -404,17 +118,15 @@ Example response:
   "chunk_count": 6,
   "status": "created"
 }
-~~~
+```
 
-### List documents
+### List documents — `GET /documents`
 
-~~~bash
+```bash
 curl http://127.0.0.1:8000/documents
-~~~
+```
 
-Example response (IDs and hashes are illustrative):
-
-~~~json
+```json
 {
   "documents": [
     {
@@ -428,101 +140,35 @@ Example response (IDs and hashes are illustrative):
   ],
   "total": 1
 }
-~~~
+```
 
-### Submit feedback
+### Rate an answer — `POST /feedback`
 
-~~~bash
+Use an `answer_id` returned by `/query`:
+
+```bash
 curl -X POST http://127.0.0.1:8000/feedback \
   -H "Content-Type: application/json" \
   -d '{"answer_id":"93b9c7a6-aa54-4e98-bf00-b3877bc9f185","rating":"up","comment":"Useful answer"}'
-~~~
+```
 
-Example response:
-
-~~~json
+```json
 {
   "feedback_id": "7fcaf370-e988-49c7-9a9d-47cd53eb518a",
   "answer_id": "93b9c7a6-aa54-4e98-bf00-b3877bc9f185",
   "accepted": true
 }
-~~~
+```
 
-Feedback for an unknown answer returns HTTP 404. Invalid request bodies return 422, oversized uploads return 413, and unsupported file formats return 415.
-
-## Brief implementation write-up
-
-I chose a narrow documentation corpus and an explicit LangGraph `StateGraph` so the assignment's decision points remain visible: analyze the question, retrieve top-k chunks, grade each chunk, and either generate from relevant evidence or rewrite and retrieve again within a fixed budget. The graph state carries the current search query, retrieved and graded chunks, rewrite count, draft, citation IDs, and verification result. This makes a failed retrieval different from a temporary provider failure, which is handled by bounded operational retries.
-
-The ingestion path loads UTF-8 files or public URLs, preserves section headings and nearby code while splitting into roughly 700-token chunks, embeds them with Gemini, and stores them in local Chroma. Gemini also supplies the structured chat outputs used for analysis, grading, generation, and groundedness checking. FastAPI owns validation and HTTP responses; small provider and storage adapters keep the graph testable with deterministic fakes. SQLite stores feedback and a bounded history of completed turns, while the graph's execution state remains local to each request.
-
-The main tradeoff is additional Gemini calls: each retrieved chunk is graded, and generated answers undergo citation checks and a groundedness review. This improves control over unsupported answers but increases latency and cost, and the LLM verifier is still an imperfect judge. The small local corpus and optional Tavily fallback keep the demo easy to explain; they do not replace broader retrieval evaluation or a multi-instance deployment design. With more time, I would label relevant chunks for retrieval metrics, judge claims against source passages, and test hybrid search on exact API names and errors.
+Invalid requests return HTTP 422; an oversized upload returns 413, an unsupported file type returns 415, and feedback for an unknown answer returns 404. Provider or storage failures return a service error rather than a fabricated answer.
 
 ## Design decisions and tradeoffs
 
-### Explicit graph instead of a general agent
+- **Chunking and embeddings:** I preserve section headings and nearby code, then target 700-token chunks with 80 tokens of overlap for long sections. I embed documents and queries with `gemini-embedding-001` and store their vectors in persistent local Chroma. Changing the embedding model or dimension requires rebuilding the index.
+- **Retrieval and grading:** Chroma provides the top five candidates; Gemini decides which chunks are relevant. This makes the correction loop explicit, but grading each chunk adds model calls and latency. Two query rewrites bound that cost.
+- **Citations and answer checks:** I validate source IDs in code and ask Gemini to verify the draft against approved passages. This can catch unsupported claims, but an LLM verifier is not a guarantee of factual accuracy.
+- **Local scope and optional features:** Chroma and SQLite make the project easy to run on one machine. Conversation memory is bounded, and Tavily searches only configured official domains after local retrieval fails. Web results are labeled `web` because they are less reproducible than indexed documents.
 
-The assignment has a known sequence and one controlled loop. Explicit nodes and conditional edges make state transitions, retry counts, and abstention behavior visible and testable. A free-form agent would add tool-selection behavior that is unnecessary for this use case.
+I assumed a small English-language corpus and a single local API instance. With more time, I would add labeled retrieval and answer-quality tests, hybrid keyword/vector search for exact API names, and stronger controls for multi-user ingestion. A one-document live Gemini smoke test passed; full-corpus and live Tavily/UI checks are still pending.
 
-### LLM grading after vector retrieval
-
-Similarity search provides candidate selection, while Gemini performs the semantic relevance decision required by the assignment. Grading every top-k chunk costs more than score-threshold filtering, so top-k is bounded. Sequential grading keeps the flow simple to inspect.
-
-### Heading-aware chunks
-
-Technical documentation depends on section hierarchy and nearby code. The splitter retains heading paths, keeps ordinary code blocks intact, and applies token overlap when a long section requires multiple chunks. The default target is 700 tokens with an 80-token overlap.
-
-### Deterministic document versions
-
-Document IDs derive from canonical sources, and chunk IDs include the document content hash. Re-ingesting unchanged content skips embedding. Changed content is embedded under new IDs before old chunks are removed, reducing the chance of losing a working version during replacement.
-
-### Local persistence
-
-Chroma stores document vectors, while SQLite stores answers and feedback. LangGraph state is temporary and scoped to one query. This is easy to run and explain for a single-instance take-home project.
-
-### Citation validation in application code
-
-The generator receives only graded chunks labeled S1, S2, and so on. Application code verifies that inline markers and structured citation IDs match and belong to that exact context. Unknown or inconsistent citations fail instead of being returned to the user.
-
-### Groundedness as a graph gate
-
-Citation syntax alone does not prove a claim is supported. A separate verifier sees the draft and the exact approved evidence. It can finalize, request one focused revision, or force abstention. The revision cap prevents an open-ended model loop and makes the additional cost visible.
-
-### Bounded memory without LangGraph checkpoints
-
-The API persists completed answer records in the existing SQLite database and passes a small history window only to query analysis. This is easier to explain than durable graph checkpoints and avoids treating previous model answers as factual evidence. It is intentionally a single-instance conversation feature rather than a distributed chat system.
-
-### Optional, restricted web fallback
-
-Web search occurs only after the local corpus exhausts its rewrite budget. Tavily is limited by result count, response bytes, excerpt size, and an official-domain allowlist. Returned hosts are checked again locally, results are not written into Chroma, and web provenance is exposed in every source.
-
-## Assumptions and current limitations
-
-- The initial knowledge base is intentionally limited to five English FastAPI pages.
-- Uploaded documents must be UTF-8 Markdown, plain text, or HTML.
-- Local Chroma and SQLite target a single application instance.
-- Changing the embedding model or dimension requires rebuilding the collection because vector spaces are incompatible.
-- Retrieval is dense semantic search only; keyword or hybrid retrieval could improve exact error-code and symbol searches.
-- Feedback is stored for later analysis but does not automatically change prompts or ranking.
-- Session ordering is designed for a local single-instance demo, not concurrent requests to the same session.
-- Tavily snippets are less reproducible than indexed documents, so fallback is disabled by default and web sources are labeled.
-- A one-document live Gemini smoke test passed, but the full corpus evaluation and live Tavily/UI checks remain pending. Do not interpret deterministic test results as measured answer quality.
-
-## Improvements with more time
-
-The completed [bonus implementation](IMPLEMENTATION_PLAN.md#10-bonus-implementation) covers groundedness verification, bounded session memory, Tavily fallback, and Streamlit. Further improvements outside this take-home scope include hybrid retrieval, answer-quality telemetry, a dedicated bonus evaluation set, authenticated multi-user ingestion, and transactional ordering for concurrent turns.
-
-## Submission checklist
-
-- Install: uv sync --locked
-- Configure: copy .env.example to .env and set GOOGLE_API_KEY; Tavily is optional
-- Inspect corpus: uv run python -m app.cli inspect
-- Seed corpus: uv run python -m app.cli seed
-- Start API: uv run uvicorn app.main:app --reload
-- Run deterministic tests: uv run pytest
-- Run live smoke test: set RUN_LIVE_TESTS=1, then uv run pytest -m live
-- Run evaluation: uv run python -m app.cli evaluate
-- Before submission, confirm every configured Gemini key can access the selected models and record the completed evaluation's pass rate and latency; the local key pool must not contain denied projects
-- Review interactive API docs: http://127.0.0.1:8000/docs
-- Optional UI: uv run --extra ui streamlit run app/ui.py
-- Commit and push the final documentation and code to the repository you submit
+Run the deterministic checks with `uv run ruff check .` and `uv run pytest`.
