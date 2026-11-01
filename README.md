@@ -2,6 +2,10 @@
 
 Know-It answers questions about technical documentation with cited sources. It retrieves relevant passages, asks Gemini to grade them, and answers only from approved evidence. When the documents cannot support an answer, it returns `insufficient_context`. The initial corpus is five pages from the official FastAPI documentation, listed in [corpus/seed_urls.json](corpus/seed_urls.json).
 
+![Know-It Streamlit interface showing a cited answer](assets/image.png)
+
+The Streamlit interface displays answers with links to the documentation chunks used as sources.
+
 ## Architecture
 
 ```mermaid
