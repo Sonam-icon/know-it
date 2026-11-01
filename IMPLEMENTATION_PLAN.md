@@ -26,15 +26,17 @@ I started with these contracts so the API, graph, and storage code would agree o
 
 ## Phase 1 — I ingested the documentation
 
-I listed the five FastAPI pages in `corpus/seed_urls.json`. My ingestion path loads a file or public URL, extracts useful text, and preserves headings and nearby code. I split long sections into chunks targeting 700 tokens, with 80 tokens of overlap where needed. I chose this approach because headings give a technical passage its subject, while overlap protects context at chunk boundaries.
+I listed the five FastAPI pages in `corpus/seed_urls.json`. My ingestion path loads a file or public URL, extracts useful text, and preserves headings and nearby code. I split by heading first, then target 700-token chunks with 80 tokens of overlap when a section is too long. I chose this size to keep each passage focused while leaving enough room for an explanation and its code example. I use overlap to protect context when an answer spans two chunks.
 
-I embed the chunks with `gemini-embedding-001` and store them in local Chroma. I use stable document IDs and content hashes so an unchanged page is not embedded again. I record the embedding model and dimension with the collection because changing either requires a new index. I use the same ingestion service for the seed command and `POST /ingest`.
+I use `gemini-embedding-001` for both document chunks and search queries, with its document and query retrieval task types. I store the resulting 3,072-dimensional vectors in local Chroma. I use one embedding model to keep documents and queries in a comparable vector space. I use stable document IDs and content hashes so an unchanged page is not embedded again. I record the model and dimension with the collection because changing either requires a new index. I use the same ingestion service for the seed command and `POST /ingest`.
 
 ## Phase 2 — I built the LangGraph workflow
 
 I implemented the graph in `app/query_workflow.py`. I use typed state to hold the original question, current search query, retrieved chunks, relevance grades, approved chunks, rewrite count, draft, verification result, and final answer. I replace retrieval results on every pass so a failed search cannot leak old evidence into generation.
 
 I made query analysis produce a standalone question and search query. I retrieve the top five Chroma chunks, then ask Gemini to grade each one. If at least one chunk is relevant, I generate only from those approved chunks. If none is relevant, I route through a conditional edge to rewrite the query and retrieve again. I allow two rewrites, so a question has at most three local retrieval passes. If evidence is still missing, I abstain or try the optional web fallback.
+
+I separate analysis from retrieval so a follow-up question can stand on its own. I grade after vector search because semantic similarity alone does not prove that a chunk answers the question. I keep generation separate so it receives only chunks that passed grading.
 
 I validate citation IDs and inline markers against the approved chunks before returning an answer. I also check the draft against its evidence and allow one revision when the verifier finds unsupported claims. I treat malformed model output as an error, while missing evidence produces `insufficient_context`.
 
@@ -63,10 +65,18 @@ I made the README the main guide for reviewers. There I explain the stack and gr
 3. I added an optional Tavily search after local rewrites fail. I restrict results to configured official domains, grade the excerpts, and label any resulting source as `web`.
 4. I added a small Streamlit interface that calls the FastAPI routes for questions, citations, sessions, and feedback. I keep Gemini, Chroma, and SQLite access in the backend.
 
-## What I traded off and what remains
+## Why I made these choices
 
 I chose an explicit graph over a general agent because the assignment has a known path and one important decision loop. I chose local Chroma and SQLite because they are easy to run and inspect for a single-instance demonstration. I accept extra model calls for chunk grading and answer verification because they make the evidence decisions visible. I kept the corpus to five pages so it is easy to evaluate, although I need Tavily to cover questions outside those pages.
 
-I have indexed the five pages locally. I passed the deterministic tests, lint checks, and a one-document live Gemini smoke test. I have not recorded a full 15-case live evaluation or completed live Tavily and UI checks.
+## Assumptions I made
 
-With more time, I would label relevant chunks for retrieval metrics, add hybrid keyword and vector search for exact API symbols, and test answer claims against a human-reviewed set of source passages.
+I assume a small English-language documentation corpus and one local API instance. I use Gemini credentials supplied through `.env`, keep Tavily disabled unless configured, and treat uploaded or fetched documentation as untrusted data. I do not assume that a valid citation automatically means every claim is true; that is why I added answer verification.
+
+## What I would improve with more time
+
+I would label relevant chunks and measure how often the retriever finds them and ranks them near the top. I would review answers claim by claim against the source passages instead of relying only on an LLM verifier. I would also combine keyword and vector search for exact API names and add stronger controls for multi-user ingestion.
+
+## What I have verified
+
+I have indexed the five pages locally. I passed the deterministic tests, lint checks, and a one-document live Gemini smoke test. I have not recorded a full 15-case live evaluation or completed live Tavily and UI checks.
